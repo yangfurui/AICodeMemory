@@ -46,7 +46,7 @@ class Message:
 @dataclass
 class SessionDialogue:
     session_id: str
-    project: str  # 会话 cwd 的目录名,如 "kb"、"claudeMemory"
+    project: str  # 会话 cwd 的目录名,如 "kb"、"AICodeMemory"
     date: str  # 最后一条消息的本地日期 YYYY-MM-DD
     file_mtime: int  # 处理时的源文件 mtime,供增量防重
     messages: list[Message] = field(default_factory=list)

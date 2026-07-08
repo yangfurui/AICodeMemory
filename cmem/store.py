@@ -20,7 +20,7 @@ import numpy as np
 from .chunker import Chunk
 from .embedder import DIM, MODEL_NAME
 
-DEFAULT_DB = Path.home() / ".claudememory" / "memory.sqlite3"
+DEFAULT_DB = Path.home() / ".cmem" / "memory.sqlite3"
 # v2:去噪清单扩充(task-notification/bash-*)+ FTS5 关键词索引
 SCHEMA_VERSION = "2"
 

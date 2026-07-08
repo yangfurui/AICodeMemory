@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "claudememory"
+name = "ai-code-memory"
 version = "0.1.0"
 description = "Local semantic memory for Claude Code — search your session history, verbatim, offline."
 readme = "README.md"
@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.scripts]
-cmem = "claudememory.cli:main"
+cmem = "cmem.cli:main"
 
 [tool.setuptools]
-packages = ["claudememory"]
+packages = ["cmem"]
