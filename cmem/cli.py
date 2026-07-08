@@ -12,43 +12,75 @@ DEFAULT_SOURCE = Path.home() / ".claude" / "projects"
 
 def cmd_index(args) -> int:
     from .chunker import chunk_session
-    from .extractor import iter_session_files, parse_session
-    from .store import DEFAULT_DB, Store
+    from .extractor import iter_session_files, parse_session, session_id_of
+    from .raw import archive_session, iter_archived_files
+    from .store import Store
 
     source = Path(args.source).expanduser()
-    if not source.is_dir():
-        print(f"数据源不存在: {source}", file=sys.stderr)
-        return 1
-
     store = Store(Path(args.db).expanduser())
-    embedder = None  # 惰性:全部会话都无需更新时,不加载模型
-    t0 = time.time()
-    n_seen = n_indexed = n_chunks = 0
 
-    for f in iter_session_files(source):
-        n_seen += 1
-        mtime = int(f.stat().st_mtime)  # 读取内容前取,追加发生时下次会重索引
-        if not store.should_process(f.stem, mtime):
-            continue
-        sess = parse_session(f)
-        if sess is None or not (chunks := chunk_session(sess)):
-            store.mark_processed(f.stem, mtime)
-            continue
+    embedder = None  # 惰性:全部会话都无需更新时,不加载模型
+
+    def ensure_embedder():
+        nonlocal embedder
         if embedder is None:
             print("加载 embedding 模型(首次使用会下载 ~100MB)...")
             from .embedder import Embedder
             embedder = Embedder()
-        vectors = embedder.encode_texts([c.text for c in chunks])
+        return embedder
+
+    # ---- 版本轴检查:升级只做重算/覆盖,档案(text/raw)永不删 ----
+    action = store.pending_migration()
+    if action == "reembed":
+        print("检测到 embedding 模型变更:从库内原文重算全部向量(text/raw 档案不动)...")
+        n = store.reembed_all(ensure_embedder().encode_texts)
+        print(f"向量重算完成:{n} 块")
+    elif action == "reextract":
+        print("检测到提取算法/表结构变更:从 raw 存档 + 现存源全量重提取(档案不丢)...")
+        store.reset_processed_ledger()
+
+    t0 = time.time()
+    n_seen = n_indexed = n_chunks = n_archived = 0
+
+    def index_file(f: Path, archive: bool) -> None:
+        nonlocal n_seen, n_indexed, n_chunks, n_archived
+        n_seen += 1
+        sid = session_id_of(f)
+        mtime = int(f.stat().st_mtime)  # 读取内容前取,追加发生时下次会重索引
+        if archive:
+            # 存档先于账本判断:v0.2 时代已索引但未存档的会话,在这里补齐底片
+            n_archived += archive_session(f, mtime)
+        if not store.should_process(sid, mtime):
+            return
+        sess = parse_session(f)
+        if sess is None or not (chunks := chunk_session(sess)):
+            store.mark_processed(sid, mtime)
+            return
+        vectors = ensure_embedder().encode_texts([c.text for c in chunks])
         store.index_session(sess.session_id, mtime, chunks, vectors)
         n_indexed += 1
         n_chunks += len(chunks)
         if n_indexed % 25 == 0:
             print(f"  ...已索引 {n_indexed} 个会话 / {n_chunks} 块")
 
+    # 数据源一:现存源(权威版本,顺手写 raw 底片)
+    if source.is_dir():
+        for f in iter_session_files(source):
+            index_file(f, archive=True)
+    else:
+        print(f"警告:源目录不存在({source}),仅从 raw 存档索引", file=sys.stderr)
+
+    # 数据源二:raw 存档(源已被 30 天清理的历史,靠账本天然跳过与源重复的部分)
+    for f in iter_archived_files():
+        index_file(f, archive=False)
+
+    if action == "reextract":
+        store.finalize_migration()
+
     s = store.stats()
     print(
-        f"完成:扫描 {n_seen} 个会话,本次索引 {n_indexed} 个(新增/更新 {n_chunks} 块),"
-        f"耗时 {time.time() - t0:.1f}s\n"
+        f"完成:扫描 {n_seen}(源+存档),本次索引 {n_indexed} 个会话(新增/更新 {n_chunks} 块),"
+        f"新存档 {n_archived} 份,耗时 {time.time() - t0:.1f}s\n"
         f"库中现有 {s['chunks']} 块 / {s['sessions']} 会话,覆盖 {s['date_min']} ~ {s['date_max']}"
     )
     return 0
@@ -92,14 +124,21 @@ def cmd_search(args) -> int:
 
 
 def cmd_status(args) -> int:
+    from .raw import RAW_DIR
+    from .raw import stats as raw_stats
     from .store import Store
 
-    s = Store(Path(args.db).expanduser()).stats()
+    store = Store(Path(args.db).expanduser())
+    s = store.stats()
     if not s["chunks"]:
         print("库是空的,先跑 cmem index")
         return 0
+    r = raw_stats()
     print(f"块:      {s['chunks']}\n会话:    {s['sessions']}\n项目:    {s['projects']}\n"
-          f"日期覆盖: {s['date_min']} ~ {s['date_max']}")
+          f"日期覆盖: {s['date_min']} ~ {s['date_max']}\n"
+          f"raw 存档: {r['files']} 份 / {r['bytes'] / 1048576:.1f} MB({RAW_DIR})\n"
+          f"完整性:  {store.integrity_check()}\n"
+          f"版本:    extract={s['extract_version']} · model={s['model']}")
     return 0
 
 

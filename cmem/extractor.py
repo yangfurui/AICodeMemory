@@ -14,12 +14,19 @@ Claude Code 的会话文件是逐行 JSON(~/.claude/projects/<project>/<uuid>.js
 
 from __future__ import annotations
 
+import gzip
 import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
+
+# 去噪/切块算法的版本轴:本文件的过滤规则或 chunker 的切块策略发生语义
+# 变化时 bump。库检测到不一致会触发"从 raw 存档重提取"(见 store 的
+# pending_migration)——只在真正影响产出的变更时动它。
+# "2" 对应 v0.2 的去噪清单,与既有库无缝衔接。
+EXTRACT_VERSION = "2"
 
 # 系统注入的提醒块,出现在 user 消息文本内
 _SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
@@ -59,6 +66,11 @@ def iter_session_files(source: Path) -> Iterator[Path]:
     )
 
 
+def session_id_of(path: Path) -> str:
+    """源文件与 raw 存档共用的会话 ID:xxx.jsonl 与 xxx.jsonl.gz → xxx。"""
+    return path.name.removesuffix(".gz").removesuffix(".jsonl")
+
+
 def _clean_user_text(text: str) -> str:
     if any(m in text for m in _COMMAND_MARKERS):
         return ""
@@ -89,14 +101,17 @@ def _to_local_date(iso_ts: str) -> str:
 
 
 def parse_session(path: Path) -> SessionDialogue | None:
-    """解析一个会话文件;无有效对话时返回 None。"""
+    """解析一个会话文件(源 .jsonl 或 raw 存档 .jsonl.gz);无有效对话时返回 None。"""
     # 在读取内容前取 mtime:处理期间若有追加,下次增量会重新处理(借鉴 trace)
     mtime = int(path.stat().st_mtime)
     messages: list[Message] = []
     cwd = ""
     last_ts = ""
 
-    with path.open(encoding="utf-8", errors="replace") as f:
+    opener = (lambda: gzip.open(path, "rt", encoding="utf-8", errors="replace")) \
+        if path.name.endswith(".gz") else \
+        (lambda: path.open(encoding="utf-8", errors="replace"))
+    with opener() as f:
         for line in f:
             line = line.strip()
             if not line:
@@ -128,7 +143,7 @@ def parse_session(path: Path) -> SessionDialogue | None:
     if not messages:
         return None
     return SessionDialogue(
-        session_id=path.stem,
+        session_id=session_id_of(path),
         project=Path(cwd).name if cwd else "unknown",
         date=_to_local_date(last_ts) if last_ts else "",
         file_mtime=mtime,

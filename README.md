@@ -1,8 +1,10 @@
 # AICodeMemory
 
-**Local semantic memory for Claude Code — search your session history, verbatim, offline.**
+**Claude Code 只给你 30 天,AICodeMemory 把它变成永久。**
 
-给 Claude Code 的本地会话记忆:把 `~/.claude/projects/` 下的历史会话索引成可语义检索的本地库,让你——以及 Claude 自己——随时找回"当时的原话"。
+Local semantic memory for your AI coding sessions — verbatim, offline, forever.
+
+把 `~/.claude/projects/` 下的会话历史归档成**永久、可语义检索**的本地记忆库,让你——以及 Claude 自己——随时找回"当时的原话",哪怕原始记录早已被自动清理。
 
 ```
 $ cmem search "AGP 8 升级后 Kotlin 编译失败怎么解决"
@@ -15,8 +17,9 @@ $ cmem search "AGP 8 升级后 Kotlin 编译失败怎么解决"
 
 ## 为什么
 
-Claude Code 的会话记录 **30 天后被自动清理**,而且每个新会话都是失忆重启——上周定的方案、踩过的坑、说过的原话,全部找不回。AICodeMemory 把它们变成一个可语义检索的本地库:
+Claude Code 的会话记录 **30 天后被自动清理**,而且每个新会话都是失忆重启——上周定的方案、踩过的坑、说过的原话,全部找不回。AICodeMemory 在清理发生之前把它们归档:
 
+- **永久档案** — 原始会话 gzip 存档 + 对话原文入库,双层保全;源被清理后记忆依然完整,任何升级都不丢数据(有契约测试锁死)
 - **极简** — 单文件 SQLite + numpy 精确检索,零服务、零守护进程、零配置。核心代码几百行,一顿饭的时间能读完
 - **中文一等公民** — bge 中文 embedding + jieba 分词的混合检索(语义 0.6 + 关键词 0.4)
 - **数据不出机** — 本地模型推理,无 API key,无云,无遥测
@@ -57,20 +60,34 @@ cmem status              # 库概况:块数、会话数、日期覆盖
 ## 工作原理
 
 ```
-~/.claude/projects/**/*.jsonl
-    │  cmem index
-    ▼
-去噪(只留人/AI 对话,滤工具输出、思维链、系统噪音)
- → 切块(一问一答一块,对齐 embedding 模型 512 token 上限)
- → 本地嵌入(bge-small-zh-v1.5,512 维)
- → SQLite(原文 + 向量,~/.cmem/memory.sqlite3)
-    ▲
-    │  cmem search
-查询嵌入 → 全库精确 cosine(numpy 矩阵点积)→ top-50 候选
- → jieba BM25 重排 → 6:4 融合 → top-k 原文
+~/.claude/projects/**/*.jsonl(源:Claude Code 30 天滚动清理)
+    │  cmem index(一次扫描,双层归档)
+    ├────────────────────────┐
+    ▼                        ▼
+【raw 原始层】           【text 档案层 + 索引层】
+ 源文件原样 gzip           去噪 → 一问一答切块 → 本地嵌入(bge, 512 维)
+ ~/.cmem/raw/              → SQLite(原文 + 向量 + FTS,~/.cmem/memory.sqlite3)
+ 永不自动删除                  ▲
+                              │  cmem search
+              查询嵌入 → 全库精确 cosine ∪ FTS5 关键词召回
+               → jieba BM25 + 向量 6:4 融合重排 → top-k 原文
 ```
 
-设计取舍:**不用向量数据库、不用 ANN 索引**。个人量级(几万~几十万块)下,numpy 全库精确计算本身就是毫秒级,比任何近似索引都简单且召回=100%。索引库是纯派生缓存——删掉重跑 `cmem index` 即可完整重建,永远不需要备份或迁移。
+三层数据的生命周期(这是本项目的核心契约,有测试锁死):
+
+| 层 | 内容 | 能否再生 |
+|---|---|---|
+| raw 原始层 | 源 jsonl 的 gzip 拷贝(底片) | 不可再生,**永不自动删除** |
+| text 档案层 | 去噪后的对话原文(剪报) | 可从 raw 重提取,**永不自动删除** |
+| 索引层 | 向量 + FTS | 随时可从 text 重算 |
+
+升级永不丢数据:换 embedding 模型 → 只重算向量;改提取算法 → 从 raw 重提取。
+
+设计取舍:**不用向量数据库、不用 ANN 索引**。个人量级(几万~几十万块)下,numpy 全库精确计算本身就是毫秒级,比任何近似索引都简单且召回=100%。
+
+## ⚠️ 备份提醒
+
+`~/.cmem/` 保存着**超过 30 天窗口的唯一对话记录**(源已被 Claude Code 清理)——请把它纳入你的常规备份(Time Machine / 云盘同步任选)。这是整个工具里唯一需要你操心的一件事。
 
 ## License
 
