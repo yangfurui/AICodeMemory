@@ -1,4 +1,4 @@
-# claudeMemory
+# AICodeMemory
 
 **Local semantic memory for Claude Code — search your session history, verbatim, offline.**
 
