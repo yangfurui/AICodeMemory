@@ -23,8 +23,18 @@ from typing import Iterator
 
 # 系统注入的提醒块,出现在 user 消息文本内
 _SYSTEM_REMINDER_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
-# 出现任一标记即视为斜杠命令/本地命令样板消息,整条丢弃
-_COMMAND_MARKERS = ("<command-name>", "<local-command-stdout>", "<local-command-caveat>")
+# 出现任一标记即视为系统注入/样板消息,整条丢弃。
+# 注意只按已知系统标记精准过滤,不做"见尖括号就杀"——对话正文里
+# 大量出现 Set<string>、<uid> 这类代码占位符(2026-07-08 全量审计证实)。
+_COMMAND_MARKERS = (
+    "<command-name>",         # 斜杠命令样板
+    "<local-command-stdout>",
+    "<local-command-caveat>",
+    "<task-notification>",    # 后台任务完成通知(伪装成 user 的系统消息,含 result/usage 全家族)
+    "<bash-input>",           # 用户 ! 前缀本地命令的回显(操作记录,非对话)
+    "<bash-stdout>",
+    "<bash-stderr>",
+)
 
 
 @dataclass

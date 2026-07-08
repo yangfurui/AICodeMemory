@@ -58,6 +58,7 @@ def cmd_search(args) -> int:
     from .embedder import Embedder
     from .searcher import search
     from .store import Store
+    from .tokenizer import tokenize
 
     store = Store(Path(args.db).expanduser())
     rows, matrix = store.load_matrix()
@@ -65,7 +66,23 @@ def cmd_search(args) -> int:
         print("库是空的,先跑 cmem index", file=sys.stderr)
         return 1
 
-    hits = search(rows, matrix, Embedder().encode_query(args.query), args.query, k=args.k)
+    # 来源过滤:行与矩阵同步裁剪;FTS 候选靠 id 失配自然跟随,无需单独过滤
+    if args.before or args.exclude_project:
+        import numpy as np
+
+        excl = set(args.exclude_project or [])
+        # date 为空的块在 --before 下保守排除(无法判定时间)
+        mask = [(not args.before or (r[3] and r[3] < args.before)) and r[2] not in excl
+                for r in rows]
+        rows = [r for r, m in zip(rows, mask) if m]
+        matrix = matrix[np.array(mask)]
+        if not rows:
+            print("过滤条件下没有可检索的块", file=sys.stderr)
+            return 1
+
+    fts_ids = store.fts_candidates(tokenize(args.query))
+    hits = search(rows, matrix, Embedder().encode_query(args.query), args.query,
+                  k=args.k, fts_ids=fts_ids)
     for rank, h in enumerate(hits, 1):
         print(f"[{rank}] {h.score:.3f} (cos {h.cos:.3f} · bm25 {h.bm25:.2f}) "
               f"· {h.date or '????-??-??'} · {h.project} · {h.session_id[:8]}")
@@ -100,6 +117,10 @@ def main() -> None:
     sp = sub.add_parser("search", help="语义检索历史会话")
     sp.add_argument("query")
     sp.add_argument("-k", type=int, default=5, help="返回条数(默认 5)")
+    sp.add_argument("--before", metavar="YYYY-MM-DD",
+                    help="只检索该日期之前的块(排除后来复述历史的会话)")
+    sp.add_argument("--exclude-project", action="append", metavar="NAME",
+                    help="排除指定项目,可重复使用")
     sp.set_defaults(fn=cmd_search)
 
     sp = sub.add_parser("status", help="索引库概况")
