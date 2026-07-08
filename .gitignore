@@ -1,0 +1,12 @@
+# Python
+.venv/
+__pycache__/
+*.egg-info/
+dist/
+build/
+
+# macOS
+.DS_Store
+
+# 本地索引库是派生缓存(可随时从源重建),永不入库
+*.sqlite3
