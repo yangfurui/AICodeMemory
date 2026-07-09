@@ -13,6 +13,7 @@ DEFAULT_SOURCE = Path.home() / ".claude" / "projects"
 def cmd_index(args) -> int:
     from .chunker import chunk_session
     from .extractor import parse_session, session_id_of
+    from .heartbeat import mark_success
     from .raw import archive_session, iter_archived_files
     from .store import Store
 
@@ -85,15 +86,23 @@ def cmd_index(args) -> int:
         f"新存档 {n_archived} 份,耗时 {time.time() - t0:.1f}s\n"
         f"库中现有 {s['chunks']} 块 / {s['sessions']} 会话,覆盖 {s['date_min']} ~ {s['date_max']}"
     )
+    if n_seen == 0:
+        # 源目录与 raw 存档同时不可见(改名/迁移/挂载丢失):进程虽正常退出,
+        # 归档实已停摆——最危险的半静默失败,视同失败,不刷心跳
+        print("异常:一份会话文件都没扫到,视同失败(不刷新心跳)", file=sys.stderr)
+        return 2
+    mark_success()
     return 0
 
 
 def cmd_search(args) -> int:
     from .embedder import Embedder
+    from .heartbeat import warn_if_stale
     from .searcher import search
     from .store import Store
     from .tokenizer import tokenize
 
+    warn_if_stale()
     store = Store(Path(args.db).expanduser())
     rows, matrix = store.load_matrix()
     if not rows:
@@ -126,10 +135,12 @@ def cmd_search(args) -> int:
 
 
 def cmd_status(args) -> int:
+    from .heartbeat import describe, warn_if_stale
     from .raw import RAW_DIR
     from .raw import stats as raw_stats
     from .store import Store
 
+    warn_if_stale()
     store = Store(Path(args.db).expanduser())
     s = store.stats()
     if not s["chunks"]:
@@ -140,6 +151,7 @@ def cmd_status(args) -> int:
           f"日期覆盖: {s['date_min']} ~ {s['date_max']}\n"
           f"raw 存档: {r['files']} 份 / {r['bytes'] / 1048576:.1f} MB({RAW_DIR})\n"
           f"完整性:  {store.integrity_check()}\n"
+          f"上次成功索引: {describe()}\n"
           f"版本:    extract={s['extract_version']} · model={s['model']}")
     return 0
 
@@ -192,9 +204,11 @@ def cmd_verify(args) -> int:
 def cmd_show(args) -> int:
     import gzip
 
+    from .heartbeat import warn_if_stale
     from .raw import find_archive
     from .store import Store
 
+    warn_if_stale()
     store = Store(Path(args.db).expanduser())
 
     if args.raw:
