@@ -24,5 +24,5 @@ def test_stale_and_missing_both_warn(tmp_path, capsys):
     later = time.time() + (STALE_AFTER_H + 24) * 3600
     assert warn_if_stale(hb, now=later) is True
     err = capsys.readouterr().err
-    assert err.count("⚠️") == 2 and "launchd" in err
+    assert err.count("⚠️") == 2 and "cmem index" in err
     assert "天前" in describe(hb, now=later)

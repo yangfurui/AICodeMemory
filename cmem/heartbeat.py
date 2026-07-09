@@ -1,20 +1,22 @@
-"""Heartbeat — 静默失败告警(launchd 归档任务停摆的探测层)。
+"""Heartbeat — 静默失败告警(自动索引停摆的探测层)。
 
 原则:失败者不能自报失败——cmem 命令本身失效(重装后路径变化/venv 损坏)时,
-launchd 任务根本起不来,写在任务里的任何告警代码都不会执行。告警因此挂在
+定时任务根本起不来,写在任务里的任何告警代码都不会执行。告警因此挂在
 两处"必然还活着"的东西上:
 
 - 使用路径(search / show / status):读心跳文件,超龄即向 stderr 告警。
   本工具的日常界面是 AI 会话,stderr 随工具结果被 AI 看到并转告用户,
   送达率高于系统通知;
-- /bin/bash:launchd plist 用 bash 包一层 `cmem index || osascript 通知`,
-  防的正是"命令没了/坏了"这种最可能的静默失败(bash 自身不会失效)。
+- 调度器侧的失败分支:定时任务应用 shell 包一层
+  `cmem index || <弹平台通知>`(shell 自身不会失效),防的正是
+  "命令没了/坏了"这种最可能的静默失败。具体由各平台调度器
+  (launchd/cron/systemd)承载,规划中的 cmem setup 负责生成。
 
 心跳只在 cmem index【成功收尾且扫描数 > 0】时刷新:扫到 0 份(源目录改名/
 迁移导致两个数据源都不可见)时进程虽正常退出,归档实已停摆——视同失败。
 
-阈值 72h:每日 + 每次登录双触发下,3 天没成功必有异常;此时距 30 天
-清理窗口还剩约 27 天裕量,足够从容修复。
+阈值 72h:按"每日一跑"的推荐节奏,3 天没成功必有异常;此时距 Claude Code
+默认 30 天清理窗口还剩约 27 天裕量,足够从容修复。
 """
 
 from __future__ import annotations
@@ -57,7 +59,10 @@ def warn_if_stale(path: Path = HEARTBEAT, now: float | None = None) -> bool:
     h = _age_hours(path, now)
     if h is not None and h <= STALE_AFTER_H:
         return False
-    what = "从未成功运行过" if h is None else f"已 {h / 24:.1f} 天未成功更新"
-    print(f"⚠️ 索引{what}——launchd 任务可能失效,请跑 cmem index,"
-          f"并查看 ~/.cmem/launchd-index.log", file=sys.stderr)
+    if h is None:
+        print("⚠️ 索引尚无成功记录——请跑 cmem index(建议配置每日自动索引)",
+              file=sys.stderr)
+    else:
+        print(f"⚠️ 索引已 {h / 24:.1f} 天未成功更新,搜索可能缺最近内容——"
+              f"请跑 cmem index;若配置过自动索引,它可能已失效", file=sys.stderr)
     return True
