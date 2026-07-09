@@ -12,7 +12,7 @@ DEFAULT_SOURCE = Path.home() / ".claude" / "projects"
 
 def cmd_index(args) -> int:
     from .chunker import chunk_session
-    from .extractor import iter_session_files, parse_session, session_id_of
+    from .extractor import parse_session, session_id_of
     from .raw import archive_session, iter_archived_files
     from .store import Store
 
@@ -50,6 +50,8 @@ def cmd_index(args) -> int:
         if archive:
             # 存档先于账本判断:v0.2 时代已索引但未存档的会话,在这里补齐底片
             n_archived += archive_session(f, mtime)
+        if sid.startswith("agent-"):
+            return  # 子代理侧链:只进底片(原始数据完整性),不进检索(不是"说过的话")
         if not store.should_process(sid, mtime):
             return
         sess = parse_session(f)
@@ -63,9 +65,9 @@ def cmd_index(args) -> int:
         if n_indexed % 25 == 0:
             print(f"  ...已索引 {n_indexed} 个会话 / {n_chunks} 块")
 
-    # 数据源一:现存源(权威版本,顺手写 raw 底片)
+    # 数据源一:现存源(权威版本,顺手写 raw 底片;agent-* 侧链也拍底片)
     if source.is_dir():
-        for f in iter_session_files(source):
+        for f in sorted(source.rglob("*.jsonl")):
             index_file(f, archive=True)
     else:
         print(f"警告:源目录不存在({source}),仅从 raw 存档索引", file=sys.stderr)
@@ -139,6 +141,34 @@ def cmd_status(args) -> int:
           f"raw 存档: {r['files']} 份 / {r['bytes'] / 1048576:.1f} MB({RAW_DIR})\n"
           f"完整性:  {store.integrity_check()}\n"
           f"版本:    extract={s['extract_version']} · model={s['model']}")
+    return 0
+
+
+def cmd_list(args) -> int:
+    """列出库中的会话(档案目录)。--porcelain 输出稳定的 TAB 分隔格式,
+    供脚本消费:session_id<TAB>mtime<TAB>date<TAB>project<TAB>chunks。"""
+    from .store import Store
+
+    store = Store(Path(args.db).expanduser())
+    rows = store.conn.execute(
+        """SELECT c.session_id, COALESCE(p.mtime, 0), c.date, c.project, COUNT(*)
+           FROM chunks c LEFT JOIN processed p ON p.session_id = c.session_id
+           GROUP BY c.session_id
+           ORDER BY COALESCE(p.mtime, 0) DESC"""
+    ).fetchall()
+    if args.since:
+        rows = [r for r in rows if r[2] and r[2] >= args.since]
+    if not rows:
+        print("(空)", file=sys.stderr)
+        return 1
+    if args.porcelain:
+        for sid, mtime, date, project, chunks in rows:
+            print(f"{sid}\t{mtime}\t{date}\t{project}\t{chunks}")
+    else:
+        print(f"{'会话':<38}{'日期':<12}{'项目':<24}{'块':>5}")
+        for sid, _, date, project, chunks in rows:
+            print(f"{sid:<38}{date or '?':<12}{project:<24}{chunks:>5}")
+        print(f"\n共 {len(rows)} 场会话")
     return 0
 
 
@@ -225,6 +255,12 @@ def main() -> None:
 
     sp = sub.add_parser("status", help="索引库概况")
     sp.set_defaults(fn=cmd_status)
+
+    sp = sub.add_parser("list", help="列出库中的会话(档案目录)")
+    sp.add_argument("--since", metavar="YYYY-MM-DD", help="只列该日期(含)之后的会话")
+    sp.add_argument("--porcelain", action="store_true",
+                    help="TAB 分隔的稳定输出(sid/mtime/date/project/chunks),供脚本用")
+    sp.set_defaults(fn=cmd_list)
 
     sp = sub.add_parser("verify", help="档案体检:raw 底片逐份验 CRC + 库完整性")
     sp.set_defaults(fn=cmd_verify)

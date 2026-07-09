@@ -38,10 +38,12 @@ def write_session_jsonl(dir_, sid, user_text, assistant_text, ts="2026-07-08T03:
 
 
 def index_one(store, path, raw_dir):
-    """cli 索引循环对单文件的等价操作(假向量)。"""
+    """cli 索引循环对单文件的等价操作(假向量),与 cmd_index 行为保持镜像。"""
     sid = session_id_of(path)
     mtime = int(path.stat().st_mtime)
     archive_session(path, mtime, raw_dir)
+    if sid.startswith("agent-"):
+        return  # 侧链只进底片不进索引
     if not store.should_process(sid, mtime):
         return
     sess = parse_session(path)
@@ -121,6 +123,18 @@ def test_contract_upgrade_never_loses_text(env):
     assert texts_after == texts_before, "reextract 后 text 集合变化,违反档案契约"
     assert len(list(iter_archived_files(raw_dir))) == raw_before
     assert store.pending_migration() == "none"
+
+
+def test_agent_sidechain_archived_but_not_indexed(env):
+    """agent-* 侧链:进底片(原始数据完整性),不进检索库(不是"说过的话")。"""
+    source, raw_dir, store = env
+    f = write_session_jsonl(source, "agent-abc123", "子代理任务", "子代理过程输出")
+    index_one(store, f, raw_dir)
+    assert archive_path_for(f, raw_dir).exists(), "agent 侧链未拍底片,原始数据不完整"
+    n = store.conn.execute(
+        "SELECT COUNT(*) FROM chunks WHERE session_id LIKE 'agent-%'"
+    ).fetchone()[0]
+    assert n == 0, "agent 侧链混入了检索库"
 
 
 def test_v02_legacy_meta_upgrades_smoothly(tmp_path):
