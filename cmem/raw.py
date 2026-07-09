@@ -64,3 +64,24 @@ def stats(raw_dir: Path = RAW_DIR) -> dict:
         "files": len(files),
         "bytes": sum(f.stat().st_size for f in files),
     }
+
+
+def verify_archives(raw_dir: Path = RAW_DIR) -> tuple[int, list[tuple[Path, str]]]:
+    """底片体检:逐份完整解压——gzip 读到 EOF 时自动核对 CRC32,
+    位翻转/截断都会在这里暴露。返回 (总数, [(损坏文件, 错误)])。"""
+    total, bad = 0, []
+    for gz in iter_archived_files(raw_dir):
+        total += 1
+        try:
+            with gzip.open(gz, "rb") as f:
+                while f.read(1 << 20):
+                    pass
+        except (OSError, EOFError, gzip.BadGzipFile) as e:
+            bad.append((gz, str(e)))
+    return total, bad
+
+
+def find_archive(session_prefix: str, raw_dir: Path = RAW_DIR) -> list[Path]:
+    """按会话 ID 前缀定位底片(可能多个项目下有同前缀,全部返回)。"""
+    return [p for p in iter_archived_files(raw_dir)
+            if p.name.startswith(session_prefix)]

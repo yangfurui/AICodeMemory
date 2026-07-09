@@ -142,6 +142,67 @@ def cmd_status(args) -> int:
     return 0
 
 
+def cmd_verify(args) -> int:
+    from .raw import verify_archives
+    from .store import Store
+
+    total, bad = verify_archives()
+    db_ok = Store(Path(args.db).expanduser()).integrity_check()
+    print(f"raw 底片: {total} 份,损坏 {len(bad)} 份")
+    for p, err in bad:
+        print(f"  ✗ {p}  ({err})")
+    print(f"索引库:   {db_ok}")
+    if bad or db_ok != "ok":
+        print("\n发现损坏——请从你的备份恢复 ~/.cmem 对应文件", file=sys.stderr)
+        return 1
+    print("档案完整 ✓")
+    return 0
+
+
+def cmd_show(args) -> int:
+    import gzip
+
+    from .raw import find_archive
+    from .store import Store
+
+    store = Store(Path(args.db).expanduser())
+
+    if args.raw:
+        # 字面意义的"读原始数据":解压底片原样输出(可管道给 jq/grep)
+        matches = find_archive(args.session)
+        if not matches:
+            print(f"raw 层没有匹配 '{args.session}' 的底片", file=sys.stderr)
+            return 1
+        if len(matches) > 1:
+            print("匹配多份,请用更长前缀:", file=sys.stderr)
+            for m in matches:
+                print(f"  {m}", file=sys.stderr)
+            return 1
+        sys.stdout.write(gzip.open(matches[0], "rt", encoding="utf-8", errors="replace").read())
+        return 0
+
+    rows = store.conn.execute(
+        "SELECT session_id, project, date, chunk_index, text FROM chunks "
+        "WHERE session_id LIKE ? ORDER BY session_id, chunk_index",
+        (args.session + "%",),
+    ).fetchall()
+    if not rows:
+        print(f"库中没有匹配 '{args.session}' 的会话", file=sys.stderr)
+        return 1
+    sids = {r[0] for r in rows}
+    if len(sids) > 1:
+        print("匹配多个会话,请用更长前缀:", file=sys.stderr)
+        for s in sorted(sids):
+            print(f"  {s}", file=sys.stderr)
+        return 1
+
+    sid, project, date = rows[0][0], rows[0][1], rows[0][2]
+    print(f"会话 {sid} · {project} · {date} · {len(rows)} 块\n{'=' * 60}")
+    for _, _, _, idx, text in rows:
+        print(f"\n--- 块 #{idx} ---\n{text}")
+    return 0
+
+
 def main() -> None:
     from .store import DEFAULT_DB
 
@@ -164,6 +225,15 @@ def main() -> None:
 
     sp = sub.add_parser("status", help="索引库概况")
     sp.set_defaults(fn=cmd_status)
+
+    sp = sub.add_parser("verify", help="档案体检:raw 底片逐份验 CRC + 库完整性")
+    sp.set_defaults(fn=cmd_verify)
+
+    sp = sub.add_parser("show", help="展开一场会话的完整上下文")
+    sp.add_argument("session", help="会话 ID(前缀即可,如 search 结果里的 8 位)")
+    sp.add_argument("--raw", action="store_true",
+                    help="输出未去噪的原始 jsonl(解压底片,可管道给 jq)")
+    sp.set_defaults(fn=cmd_show)
 
     args = p.parse_args()
     sys.exit(args.fn(args))
