@@ -8,6 +8,7 @@
 
 import gzip
 import json
+import sqlite3
 
 import numpy as np
 import pytest
@@ -15,7 +16,7 @@ import pytest
 from cmem.chunker import chunk_session
 from cmem.embedder import DIM, MODEL_NAME
 from cmem.extractor import parse_session, session_id_of
-from cmem.raw import archive_path_for, archive_session, iter_archived_files
+from cmem.raw import archive_path_for, archive_session, content_size, iter_archived_files
 from cmem.store import Store
 
 
@@ -40,15 +41,20 @@ def write_session_jsonl(dir_, sid, user_text, assistant_text, ts="2026-07-08T03:
 def index_one(store, path, raw_dir):
     """cli 索引循环对单文件的等价操作(假向量),与 cmd_index 行为保持镜像。"""
     sid = session_id_of(path)
-    mtime = int(path.stat().st_mtime)
-    archive_session(path, mtime, raw_dir)
+    stat = path.stat()
+    size = content_size(path)
+    if not path.name.endswith(".gz"):
+        archive_session(path, stat.st_mtime_ns, raw_dir)
     if sid.startswith("agent-"):
         return  # 侧链只进底片不进索引
-    if not store.should_process(sid, mtime):
+    if not store.should_process("claude", sid, stat.st_mtime_ns, size):
         return
     sess = parse_session(path)
     chunks = chunk_session(sess)
-    store.index_session(sid, mtime, chunks, fake_encode([c.text for c in chunks]))
+    store.index_session(
+        "claude", sid, stat.st_mtime_ns, size,
+        chunks, fake_encode([c.text for c in chunks]),
+    )
 
 
 @pytest.fixture
@@ -137,14 +143,55 @@ def test_agent_sidechain_archived_but_not_indexed(env):
     assert n == 0, "agent 侧链混入了检索库"
 
 
-def test_v02_legacy_meta_upgrades_smoothly(tmp_path):
-    """v0.2 旧库(meta 无 extract_version)升级到三轴,不触发无谓重建。"""
-    store = Store(tmp_path / "memory.sqlite3")
-    store.conn.executemany(
-        "INSERT INTO meta(key, value) VALUES(?, ?)",
-        [("schema_version", "2"), ("model", MODEL_NAME)],
+def test_legacy_single_source_layout_migrates_without_losing_text(tmp_path):
+    """v0.3 单来源表升级:原文原地保留并标记 claude,只重建可再生索引。"""
+    db = tmp_path / "memory.sqlite3"
+    conn = sqlite3.connect(db)
+    conn.executescript(
+        """
+        CREATE TABLE chunks (
+            id TEXT PRIMARY KEY, session_id TEXT NOT NULL, project TEXT NOT NULL,
+            date TEXT NOT NULL, chunk_index INTEGER NOT NULL, text TEXT NOT NULL,
+            embedding BLOB NOT NULL
+        );
+        CREATE TABLE processed (session_id TEXT PRIMARY KEY, mtime INTEGER NOT NULL);
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE VIRTUAL TABLE chunks_fts USING fts5(
+            tokens, id UNINDEXED, session_id UNINDEXED
+        );
+        """
     )
-    store.conn.commit()
+    vec = np.zeros(DIM, dtype=np.float32).tobytes()
+    conn.execute(
+        "INSERT INTO chunks VALUES(?, ?, ?, ?, ?, ?, ?)",
+        ("old-id", "legacy-session", "proj", "2026-07-08", 0, "不可丢原文", vec),
+    )
+    conn.execute(
+        "INSERT INTO chunks_fts VALUES(?, ?, ?)",
+        ("不可 丢 原文", "old-id", "legacy-session"),
+    )
+    conn.execute("INSERT INTO processed VALUES(?, ?)", ("legacy-session", 123))
+    conn.executemany(
+        "INSERT INTO meta VALUES(?, ?)",
+        [("schema_version", "2"), ("extract_version", "2"), ("model", MODEL_NAME)],
+    )
+    conn.commit()
+    conn.close()
+
+    store = Store(db)
+    row = store.conn.execute(
+        "SELECT source, session_id, text FROM chunks"
+    ).fetchone()
+    assert row == ("claude", "legacy-session", "不可丢原文")
+    assert store.stats()["chunks"] == 1
     assert store.pending_migration() == "none"
-    meta = dict(store.conn.execute("SELECT key, value FROM meta").fetchall())
-    assert meta["extract_version"] == "2"
+    meta = dict(store.conn.execute("SELECT key, value FROM meta"))
+    assert meta["schema_version"] == "3"
+    processed_cols = {r[1] for r in store.conn.execute("PRAGMA table_info(processed)")}
+    assert {"source", "session_id", "mtime_ns", "size"} <= processed_cols
+    processed = store.conn.execute(
+        "SELECT source, session_id, mtime_ns, size FROM processed"
+    ).fetchone()
+    assert processed == ("claude", "legacy-session", 123_000_000_000, -1)
+    assert not store.should_process("claude", "legacy-session", 123_999_999_999, 999)
+    assert store.should_process("claude", "legacy-session", 124_000_000_000, 999)

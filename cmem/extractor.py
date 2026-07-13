@@ -17,15 +17,16 @@ from __future__ import annotations
 import gzip
 import json
 import re
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
+
+from .dialogue import Message, SessionDialogue, to_local_date
 
 # 去噪/切块算法的版本轴:本文件的过滤规则或 chunker 的切块策略发生语义
 # 变化时 bump。库检测到不一致会触发"从 raw 存档重提取"(见 store 的
 # pending_migration)——只在真正影响产出的变更时动它。
-# "2" 对应 v0.2 的去噪清单,与既有库无缝衔接。
+# Claude 的清洗输出仍是 v0.2 的 "2"。Codex 是新增来源,不应迫使既有
+# Claude 档案做一次无意义的全量重嵌入;未来任一来源的清洗语义变化再 bump。
 EXTRACT_VERSION = "2"
 
 # 系统注入的提醒块,出现在 user 消息文本内
@@ -42,21 +43,6 @@ _COMMAND_MARKERS = (
     "<bash-stdout>",
     "<bash-stderr>",
 )
-
-
-@dataclass
-class Message:
-    role: str  # "user" | "assistant"
-    text: str
-
-
-@dataclass
-class SessionDialogue:
-    session_id: str
-    project: str  # 会话 cwd 的目录名,如 "kb"、"AICodeMemory"
-    date: str  # 最后一条消息的本地日期 YYYY-MM-DD
-    file_mtime: int  # 处理时的源文件 mtime,供增量防重
-    messages: list[Message] = field(default_factory=list)
 
 
 def iter_session_files(source: Path) -> Iterator[Path]:
@@ -89,21 +75,10 @@ def _content_text(content) -> str:
     return ""
 
 
-def _to_local_date(iso_ts: str) -> str:
-    ts = iso_ts.replace("Z", "+00:00")
-    try:
-        dt = datetime.fromisoformat(ts)
-    except ValueError:
-        return ""
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone().strftime("%Y-%m-%d")
-
-
 def parse_session(path: Path) -> SessionDialogue | None:
     """解析一个会话文件(源 .jsonl 或 raw 存档 .jsonl.gz);无有效对话时返回 None。"""
     # 在读取内容前取 mtime:处理期间若有追加,下次增量会重新处理(借鉴 trace)
-    mtime = int(path.stat().st_mtime)
+    stat = path.stat()
     messages: list[Message] = []
     cwd = ""
     last_ts = ""
@@ -143,9 +118,11 @@ def parse_session(path: Path) -> SessionDialogue | None:
     if not messages:
         return None
     return SessionDialogue(
+        source="claude",
         session_id=session_id_of(path),
         project=Path(cwd).name if cwd else "unknown",
-        date=_to_local_date(last_ts) if last_ts else "",
-        file_mtime=mtime,
+        date=to_local_date(last_ts) if last_ts else "",
+        file_mtime_ns=stat.st_mtime_ns,
+        file_size=stat.st_size,
         messages=messages,
     )

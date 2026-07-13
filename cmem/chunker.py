@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .extractor import SessionDialogue
+from .dialogue import SessionDialogue
 
 CHUNK_LIMIT = 450  # 字符;对齐 bge 512 token,留余量给角色标记与英文
 QUESTION_PREFIX_LIMIT = 120  # 超长回答拆块时,问题前缀最多带这么多字
@@ -23,6 +23,7 @@ QUESTION_PREFIX_LIMIT = 120  # 超长回答拆块时,问题前缀最多带这么
 
 @dataclass
 class Chunk:
+    source: str
     session_id: str
     project: str
     date: str
@@ -62,6 +63,7 @@ def chunk_session(sess: SessionDialogue) -> list[Chunk]:
     def add(text: str) -> None:
         chunks.append(
             Chunk(
+                source=sess.source,
                 session_id=sess.session_id,
                 project=sess.project,
                 date=sess.date,

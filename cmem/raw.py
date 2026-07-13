@@ -1,7 +1,7 @@
 """Raw archive layer — the negatives, not the prints.
 
-源 jsonl(~/.claude/projects/)被 Claude Code 按 30 天滚动清理。text 档案层
-存的是去噪后的对话(剪报),而本层把源文件**原样 gzip 存档**(底片):
+上游 jsonl(Claude Code / Codex)可能被清理或改变格式。text 档案层存的是
+去噪后的对话(剪报),而本层把源文件**原样 gzip 存档**(底片):
 任何未来的去噪/切块算法改进,都能凭它回溯应用到全部历史——包括源早已
 消失的部分。
 
@@ -12,8 +12,9 @@
   源没变则跳过(零成本),源追加了内容则覆盖更新。
 - 原子写入:先写 .tmp 再 rename,中断不留半个存档。
 
-目录结构镜像源:~/.cmem/raw/<源父目录名>/<会话>.jsonl.gz
-保留 Claude Code 的项目目录编码,重提取时与直读源目录的行为完全一致。
+Claude legacy 目录保持不动;Codex 新档案按来源隔离:
+- ~/.cmem/raw/<Claude 项目>/<会话>.jsonl.gz
+- ~/.cmem/raw/codex/YYYY/MM/DD/<rollout>.jsonl.gz
 """
 
 from __future__ import annotations
@@ -21,23 +22,47 @@ from __future__ import annotations
 import gzip
 import os
 import shutil
+import struct
 from pathlib import Path
 
 RAW_DIR = Path.home() / ".cmem" / "raw"
 
 
-def archive_path_for(src: Path, raw_dir: Path = RAW_DIR) -> Path:
-    return raw_dir / src.parent.name / (src.name + ".gz")
+def archive_path_for(
+    src: Path,
+    raw_dir: Path = RAW_DIR,
+    source: str = "claude",
+    source_root: Path | None = None,
+) -> Path:
+    if source == "claude":
+        # 保持 v0.3 已有布局,避免复制/移动唯一底片。
+        return raw_dir / src.parent.name / (src.name + ".gz")
+    try:
+        rel = src.relative_to(source_root) if source_root else Path(src.name)
+    except ValueError:
+        rel = Path(src.name)
+    return raw_dir / source / rel.parent / (rel.name + ".gz")
 
 
-def archive_session(src: Path, mtime: int, raw_dir: Path = RAW_DIR) -> bool:
+def archive_session(
+    src: Path,
+    mtime_ns: int | None = None,
+    raw_dir: Path = RAW_DIR,
+    *,
+    source: str = "claude",
+    source_root: Path | None = None,
+) -> bool:
     """把源会话文件 gzip 存档;已是最新则跳过。返回是否实际写入。
 
-    mtime 由调用方在【读取源内容之前】stat 得到(与索引共用同一语义):
+    mtime_ns 由调用方在【读取源内容之前】stat 得到(与索引共用同一语义):
     存档期间源又有追加,gz 的 mtime 会小于源的新 mtime,下次触发重存。
     """
-    dst = archive_path_for(src, raw_dir)
-    if dst.exists() and int(dst.stat().st_mtime) >= mtime:
+    if mtime_ns is None:
+        mtime_ns = src.stat().st_mtime_ns
+    elif mtime_ns < 10**15:  # 兼容 v0.3 内部调用传入的秒级 mtime
+        mtime_ns *= 1_000_000_000
+    dst = archive_path_for(src, raw_dir, source, source_root)
+    if dst.exists() and dst.stat().st_mtime_ns >= mtime_ns:
         return False  # 存档已覆盖该版本
 
     dst.parent.mkdir(parents=True, exist_ok=True)
@@ -45,7 +70,7 @@ def archive_session(src: Path, mtime: int, raw_dir: Path = RAW_DIR) -> bool:
     try:
         with src.open("rb") as f_in, gzip.open(tmp, "wb", compresslevel=6) as f_out:
             shutil.copyfileobj(f_in, f_out)
-        os.utime(tmp, (mtime, mtime))  # gz mtime = 源 mtime,作为增量与重提取的账本
+        os.utime(tmp, ns=(mtime_ns, mtime_ns))  # gz mtime = 源 mtime,作为增量账本
         tmp.replace(dst)  # 原子落位
         return True
     finally:
@@ -58,11 +83,41 @@ def iter_archived_files(raw_dir: Path = RAW_DIR):
         yield from sorted(raw_dir.rglob("*.jsonl.gz"))
 
 
+def archive_source_of(path: Path, raw_dir: Path = RAW_DIR) -> str:
+    """v0.3 legacy 顶层目录均视为 Claude;显式 source 目录用于新来源。"""
+    try:
+        first = path.relative_to(raw_dir).parts[0]
+    except (ValueError, IndexError):
+        return "claude"
+    return first if first in {"claude", "codex"} else "claude"
+
+
+def content_size(path: Path) -> int:
+    """Return logical uncompressed size for source files and gzip archives.
+
+    gzip's ISIZE trailer lets source and raw copies share the same incremental
+    fingerprint without decompressing the archive.
+    """
+    if not path.name.endswith(".gz"):
+        return path.stat().st_size
+    try:
+        with path.open("rb") as f:
+            f.seek(-4, os.SEEK_END)
+            return struct.unpack("<I", f.read(4))[0]
+    except (OSError, struct.error):
+        return path.stat().st_size
+
+
 def stats(raw_dir: Path = RAW_DIR) -> dict:
     files = list(iter_archived_files(raw_dir))
+    sources: dict[str, int] = {}
+    for f in files:
+        source = archive_source_of(f, raw_dir)
+        sources[source] = sources.get(source, 0) + 1
     return {
         "files": len(files),
         "bytes": sum(f.stat().st_size for f in files),
+        "sources": sources,
     }
 
 
@@ -81,7 +136,23 @@ def verify_archives(raw_dir: Path = RAW_DIR) -> tuple[int, list[tuple[Path, str]
     return total, bad
 
 
-def find_archive(session_prefix: str, raw_dir: Path = RAW_DIR) -> list[Path]:
+def find_archive(
+    session_prefix: str,
+    raw_dir: Path = RAW_DIR,
+    source: str | None = None,
+) -> list[Path]:
     """按会话 ID 前缀定位底片(可能多个项目下有同前缀,全部返回)。"""
-    return [p for p in iter_archived_files(raw_dir)
-            if p.name.startswith(session_prefix)]
+    matches = []
+    for path in iter_archived_files(raw_dir):
+        provider = archive_source_of(path, raw_dir)
+        if source and provider != source:
+            continue
+        if provider == "codex":
+            from .codex_extractor import session_id_of
+
+            matched = session_id_of(path).startswith(session_prefix)
+        else:
+            matched = path.name.startswith(session_prefix)
+        if matched:
+            matches.append(path)
+    return matches

@@ -1,10 +1,12 @@
 # AICodeMemory
 
-**Claude Code 只给你 30 天,AICodeMemory 把它变成永久。**
+**把 Claude Code / Codex 的本地会话变成永久、可检索的原话档案。**
 
 Local semantic memory for your AI coding sessions — verbatim, offline, forever.
 
-把 `~/.claude/projects/` 下的会话历史归档成**永久、可语义检索**的本地记忆库,让你——以及 Claude 自己——随时找回"当时的原话",哪怕原始记录早已被自动清理。
+把 `~/.claude/projects/` 与 `~/.codex/sessions/` 下的会话历史归档成
+**永久、可语义检索**的本地记忆库,让你以及 AI 自己随时找回"当时的原话",
+哪怕上游记录已经被清理或格式发生变化。
 
 ```
 $ cmem search "AGP 8 升级后 Kotlin 编译失败怎么解决"
@@ -17,7 +19,8 @@ $ cmem search "AGP 8 升级后 Kotlin 编译失败怎么解决"
 
 ## 为什么
 
-Claude Code 的会话记录 **30 天后被自动清理**,而且每个新会话都是失忆重启——上周定的方案、踩过的坑、说过的原话,全部找不回。AICodeMemory 在清理发生之前把它们归档:
+AI 编码助手的本地会话首先是产品运行状态,不是稳定的长期档案;每个新会话也
+不会可靠地带回全部旧上下文。AICodeMemory 在上游记录仍可见时把它们归档:
 
 - **永久档案** — 原始会话 gzip 存档 + 对话原文入库,双层保全;源被清理后记忆依然完整,任何升级都不丢数据(有契约测试锁死)
 - **极简** — 单文件 SQLite + numpy 精确检索,零服务、零守护进程、零配置。核心代码几百行,一顿饭的时间能读完
@@ -38,14 +41,16 @@ python3 -m venv .venv && .venv/bin/pip install -e .
 ## 使用
 
 ```bash
-cmem index               # 索引会话历史(增量,首次即全量;之后随时重跑,只处理有变化的会话)
+cmem index               # 同时索引 Claude Code + Codex(增量,首次即全量)
+cmem index --provider codex  # 只索引 Codex;可换成 claude
 cmem search "查询" -k 5  # 语义检索,返回原文块+出处(日期/项目/会话)
+cmem search "查询" --source codex  # 只查指定来源
 cmem status              # 库概况:块数、会话数、日期覆盖
 ```
 
 实测量级参考:453 个会话(约一个月重度使用)→ 13k 块,首次索引 4.5 分钟(M 系列 CPU),增量重跑 12 秒,单次查询亚秒级。
 
-## 让 Claude 自己查
+## 让 AI 自己查
 
 不需要 MCP、不需要插件——Claude Code 本来就会跑命令。在你的 `~/.claude/CLAUDE.md` 加一条:
 
@@ -55,18 +60,21 @@ cmem status              # 库概况:块数、会话数、日期覆盖
 基于结果回答并注明出处;查不到就明说,不要凭印象编。
 ```
 
-之后问 Claude"上次那个编译错误怎么解决的?",它会自己检索并引用原话回答。
+Codex 使用同样的软约定,写入全局 `~/.codex/AGENTS.md` 即可。之后问
+"上次那个编译错误怎么解决的?",AI 会自行检索并引用原话回答。正式 MCP
+集成仍在规划中,CLI 检索已经可用。
 
 ## 工作原理
 
 ```
-~/.claude/projects/**/*.jsonl(源:Claude Code 30 天滚动清理)
+~/.claude/projects/**/*.jsonl ─┐
+~/.codex/sessions/**/*.jsonl  ─┴─(Claude/Codex 来源适配器)
     │  cmem index(一次扫描,双层归档)
     ├────────────────────────┐
     ▼                        ▼
 【raw 原始层】           【text 档案层 + 索引层】
  源文件原样 gzip           去噪 → 一问一答切块 → 本地嵌入(bge, 512 维)
- ~/.cmem/raw/              → SQLite(原文 + 向量 + FTS,~/.cmem/memory.sqlite3)
+ ~/.cmem/raw/              → SQLite(原文 + 来源 + 向量 + FTS,~/.cmem/memory.sqlite3)
  永不自动删除                  ▲
                               │  cmem search
               查询嵌入 → 全库精确 cosine ∪ FTS5 关键词召回
@@ -87,7 +95,7 @@ cmem status              # 库概况:块数、会话数、日期覆盖
 
 ## ⚠️ 备份提醒
 
-`~/.cmem/` 保存着**超过 30 天窗口的唯一对话记录**(源已被 Claude Code 清理)——请把它纳入你的常规备份(Time Machine / 云盘同步任选)。这是整个工具里唯一需要你操心的一件事。
+`~/.cmem/` 可能保存着**上游已清理、无法重新生成的唯一对话记录**——请把它纳入你的常规备份(Time Machine / 云盘同步任选)。这是整个工具里唯一需要你操心的一件事。
 
 ## License
 

@@ -33,6 +33,7 @@ class Hit:
     score: float
     cos: float
     bm25: float
+    source: str
     session_id: str
     project: str
     date: str
@@ -93,9 +94,9 @@ def search(rows: list, matrix: np.ndarray, query_vec: np.ndarray, query: str,
     hits = []
     for j in order:
         i = int(cand_idx[j])
-        _, session_id, project, date, _, text = rows[i]
+        _, session_id, project, date, _, text, source = rows[i]
         hits.append(Hit(
             score=float(fused[j]), cos=float(cos[i]), bm25=float(bm25[j]),
-            session_id=session_id, project=project, date=date, text=text,
+            source=source, session_id=session_id, project=project, date=date, text=text,
         ))
     return hits
