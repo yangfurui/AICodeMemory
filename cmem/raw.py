@@ -1,15 +1,17 @@
-"""Raw archive layer — the negatives, not the prints.
+"""Raw archive layer — the permanent source of truth.
 
-上游 jsonl(Claude Code / Codex)可能被清理或改变格式。text 档案层存的是
-去噪后的对话(剪报),而本层把源文件**原样 gzip 存档**(底片):
+上游 jsonl(Claude Code / Codex)可能被清理或改变格式。SQLite 里的
+text/chunks 是去噪、切块后的当前检索投影,而本层把源文件
+**原样 gzip 存档**(底片):
 任何未来的去噪/切块算法改进,都能凭它回溯应用到全部历史——包括源早已
 消失的部分。
 
-契约(与 text 档案层同级,不可违反):
+契约(不可违反):
 - raw 层的文件【永不自动删除】。代码里不存在删除路径;源文件从磁盘
   消失不影响其存档。
-- 存档以【源文件 mtime】为增量判定并写到 gz 文件自身的 mtime 上:
-  源没变则跳过(零成本),源追加了内容则覆盖更新。
+- 存档以【源文件 mtime + size】为增量指纹;未变则零成本跳过。
+- 已有底片只能被它的字节级追加版本更新。源被截断或改写时拒绝覆盖,
+  保住旧底片并让整次索引显式失败。
 - 原子写入:先写 .tmp 再 rename,中断不留半个存档。
 
 Claude legacy 目录保持不动;Codex 新档案按来源隔离:
@@ -26,6 +28,22 @@ import struct
 from pathlib import Path
 
 RAW_DIR = Path.home() / ".cmem" / "raw"
+
+
+class ArchiveConflictError(RuntimeError):
+    """源文件不再是已存档内容的追加版本。
+
+    宁可停止该会话的更新,也不得覆盖可能是唯一副本的旧底片。
+    """
+
+
+def _extends_archive(src: Path, archived: Path) -> bool:
+    """src 是否以 archived 的完整解压内容为字节前缀。"""
+    with gzip.open(archived, "rb") as old, src.open("rb") as new:
+        while chunk := old.read(1 << 20):
+            if new.read(len(chunk)) != chunk:
+                return False
+    return True
 
 
 def archive_path_for(
@@ -62,8 +80,23 @@ def archive_session(
     elif mtime_ns < 10**15:  # 兼容 v0.3 内部调用传入的秒级 mtime
         mtime_ns *= 1_000_000_000
     dst = archive_path_for(src, raw_dir, source, source_root)
-    if dst.exists() and dst.stat().st_mtime_ns >= mtime_ns:
-        return False  # 存档已覆盖该版本
+    if dst.exists():
+        # mtime + 未压缩大小是增量指纹;与 processed 账本语义一致。
+        if (dst.stat().st_mtime_ns, content_size(dst)) == (
+            mtime_ns,
+            src.stat().st_size,
+        ):
+            return False
+        try:
+            safe_to_replace = _extends_archive(src, dst)
+        except (OSError, EOFError, gzip.BadGzipFile) as exc:
+            raise ArchiveConflictError(
+                f"无法验证现有底片是否安全(已保留 {dst}): {exc}"
+            ) from exc
+        if not safe_to_replace:
+            raise ArchiveConflictError(
+                f"源文件发生截断或改写,拒绝覆盖现有底片: {src} -> {dst}"
+            )
 
     dst.parent.mkdir(parents=True, exist_ok=True)
     tmp = dst.with_suffix(dst.suffix + ".tmp")

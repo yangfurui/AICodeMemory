@@ -15,6 +15,7 @@ def cmd_index(args) -> int:
     from .chunker import chunk_session
     from .heartbeat import mark_success
     from .raw import (
+        ArchiveConflictError,
         archive_session,
         archive_source_of,
         content_size,
@@ -41,21 +42,21 @@ def cmd_index(args) -> int:
             embedder = Embedder()
         return embedder
 
-    # 升级只做重算/覆盖,档案 text/raw 永不全清。
+    # raw 是永久档案;text/chunks 是可从 raw 重建的当前检索投影。
     action = store.pending_migration()
     if action == "reembed":
-        print("检测到 embedding 模型变更:从库内原文重算全部向量(text/raw 档案不动)...")
+        print("检测到 embedding 模型变更:从 text 投影重算全部向量(raw 档案不动)...")
         n = store.reembed_all(ensure_embedder().encode_texts)
         print(f"向量重算完成:{n} 块")
     elif action == "reextract":
-        print("检测到提取算法变更:从 raw 存档 + 现存源全量重提取(档案不丢)...")
+        print("检测到提取算法变更:从 raw 存档 + 现存源重建 text 投影(raw 不动)...")
         store.reset_processed_ledger()
 
     t0 = time.time()
-    n_seen = n_indexed = n_chunks = n_archived = 0
+    n_seen = n_indexed = n_chunks = n_archived = n_failed = 0
 
     def index_file(f: Path, adapter, archive: bool) -> None:
-        nonlocal n_seen, n_indexed, n_chunks, n_archived
+        nonlocal n_seen, n_indexed, n_chunks, n_archived, n_failed
         n_seen += 1
         stat = f.stat()  # 读取前取;处理中继续追加会在下一轮重索引
         mtime_ns = stat.st_mtime_ns
@@ -63,13 +64,18 @@ def cmd_index(args) -> int:
         sid = adapter.session_id_of(f)
         if archive:
             # 先存底片再查账本,保证已索引但未存档的会话也会被收编。
-            n_archived += archive_session(
-                f,
-                mtime_ns,
-                raw_dir,
-                source=adapter.name,
-                source_root=adapter.root,
-            )
+            try:
+                n_archived += archive_session(
+                    f,
+                    mtime_ns,
+                    raw_dir,
+                    source=adapter.name,
+                    source_root=adapter.root,
+                )
+            except ArchiveConflictError as exc:
+                n_failed += 1
+                print(f"错误:{exc}", file=sys.stderr)
+                return  # raw 未安全收编前,不得更新该会话的 text 投影。
         if not adapter.should_index(f):
             return  # 子代理侧链等只进底片
         if not store.should_process(adapter.name, sid, mtime_ns, size):
@@ -110,6 +116,7 @@ def cmd_index(args) -> int:
     print(
         f"完成:扫描 {n_seen}(源+存档),本次索引 {n_indexed} 个会话"
         f"(新增/更新 {n_chunks} 块),新存档 {n_archived} 份,"
+        f"失败 {n_failed} 份,"
         f"耗时 {time.time() - t0:.1f}s\n"
         f"库中现有 {s['chunks']} 块 / {s['sessions']} 会话,"
         f"覆盖 {s['date_min']} ~ {s['date_max']}"
@@ -117,6 +124,12 @@ def cmd_index(args) -> int:
     if n_seen == 0:
         print("异常:一份会话文件都没扫到,视同失败(不刷新心跳)", file=sys.stderr)
         return 2
+    if n_failed:
+        print(
+            f"异常:{n_failed} 份源文件未安全收编,本次索引视同失败(不刷新心跳)",
+            file=sys.stderr,
+        )
+        return 1
     if action == "reextract":
         store.finalize_migration()
     if not args.no_heartbeat:
@@ -211,7 +224,7 @@ def cmd_status(args) -> int:
 
 
 def cmd_list(args) -> int:
-    """列出档案会话;porcelain 前五列兼容 v0.3,末尾追加 source。"""
+    """列出当前检索投影中的会话;porcelain 末尾追加 source。"""
     from .store import Store
 
     store = Store(Path(args.db).expanduser())
@@ -356,7 +369,7 @@ def main() -> None:
     sp = sub.add_parser("status", help="索引库概况")
     sp.set_defaults(fn=cmd_status)
 
-    sp = sub.add_parser("list", help="列出库中的会话(档案目录)")
+    sp = sub.add_parser("list", help="列出当前检索投影中的会话")
     sp.add_argument("--since", metavar="YYYY-MM-DD", help="只列该日期(含)之后的会话")
     sp.add_argument("--source", choices=("claude", "codex"), help="只列指定来源")
     sp.add_argument(

@@ -114,7 +114,7 @@ def parse_session(path: Path) -> SessionDialogue | None:
                 if not text:
                     continue
             else:
-                continue  # developer/system messages never enter the text archive
+                continue  # developer/system messages never enter the text projection
 
             last_ts = str(row.get("timestamp") or last_ts)
             if messages and messages[-1].role == role:

@@ -8,5 +8,5 @@ build/
 # macOS
 .DS_Store
 
-# 本地索引库是派生缓存(可随时从源重建),永不入库
+# SQLite 检索投影可从 ~/.cmem/raw 永久档案重建,永不入 git
 *.sqlite3

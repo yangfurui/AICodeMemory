@@ -1,14 +1,15 @@
-"""SQLite storage — this file is an ARCHIVE, not a cache.
+"""SQLite storage — the current searchable projection of the raw archive.
 
-上游 Agent 的本地会话可能被清理或改变格式,库中的历史可能成为唯一副本。
-由此立下本模块的最高契约(v0.3 起,不可违反):
+上游 Agent 的本地会话可能被清理或改变格式。不可再生的事实来源是
+raw gzip 底片;本库的 chunks.text 是去噪、切块后的【当前检索投影】,
+并非一份独立的不可变档案。
 
-    【text 列与 processed 之外的任何数据,永不被自动删除。】
-    代码中不存在对 chunks 的全表清空;升级路径只做"重算"与"覆盖":
-    - embedding 模型变更 → 从库内 text 重算向量(text 一字不动)
-    - 提取算法变更     → 清 processed 账本,从 raw 存档 + 现存源
-                          逐会话确定性 upsert 覆盖(旧块要么被同 ID
-                          新块覆盖,要么原样保留,绝不凭空消失)
+本模块的契约:
+- 源文件消失时不删除任何投影;历史可继续从 raw 重建。
+- 会话更新或提取算法变更时,允许在单个事务内用新投影整体替换旧投影;
+  失败则保留该会话的全部旧投影。
+- embedding 模型变更只重算向量,text 投影与 raw 都不动。
+- 任何路径都不因版本变更全表清空 chunks;提取升级从 raw 逐会话重建。
 
 其余设计要点:
 - 块 ID = sha1(source:session_id:index),确定性 → INSERT OR REPLACE 天然幂等
@@ -77,8 +78,8 @@ class Store:
     def _migrate_legacy_layout(self) -> None:
         """把 v0.3 单来源表结构原地扩为多来源。
 
-        chunks.text 只新增带默认值的 source 列;processed 与 FTS 都是可再生
-        索引,允许原地重建。任何已有 text 行都不会被删除。
+        chunks 只新增带默认值的 source 列;processed 与 FTS 都是可再生
+        数据,允许原地重建。该结构迁移不改动已有 text 投影。
         """
         chunk_cols = {r[1] for r in self.conn.execute("PRAGMA table_info(chunks)")}
         if "source" not in chunk_cols:
@@ -135,7 +136,7 @@ class Store:
         )
         self.conn.commit()
 
-    # ---- 版本轴与迁移(档案契约:识别动作,绝不在此删数据) ----
+    # ---- 版本轴与迁移(识别重算/重提取动作) ----
 
     def pending_migration(self) -> str:
         """比对三根版本轴,返回需要的迁移动作:
@@ -223,7 +224,12 @@ class Store:
         chunks: list[Chunk],
         vectors: np.ndarray,
     ) -> None:
-        """一个会话的块整体落库(chunks + FTS 同步):先删旧再插新,单事务。"""
+        """原子替换一个会话的当前投影(chunks + FTS)。
+
+        先删旧再插新可避免提取算法改变后残留过期块;二者在同一
+        SQLite 事务中,任何中途失败都会回滚至完整旧投影。raw 档案不在此库内,
+        由调用方保证先安全存档再调用本方法。
+        """
         from .tokenizer import tokenize
 
         assert len(chunks) == len(vectors)
@@ -338,6 +344,6 @@ class Store:
         }
 
     def integrity_check(self) -> str:
-        """档案体检:quick_check 通过返回 'ok',否则返回错误摘要。"""
+        """SQLite 投影体检:quick_check 通过返回 'ok',否则返回错误摘要。"""
         row = self.conn.execute("PRAGMA quick_check").fetchone()
         return row[0] if row else "unknown"
