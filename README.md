@@ -52,7 +52,26 @@ cmem status              # 库概况:块数、会话数、日期覆盖
 
 ## 让 AI 自己查
 
-不需要 MCP、不需要插件——Claude Code 本来就会跑命令。在你的 `~/.claude/CLAUDE.md` 加一条:
+推荐把 AICodeMemory 注册为本地 stdio MCP server。以 Claude Code 为例,
+在上面 clone 的项目目录中执行:
+
+```bash
+claude mcp add --transport stdio --scope user cmem -- "$(pwd)/.venv/bin/cmem-mcp"
+claude mcp get cmem       # 检查注册结果;会话内也可用 /mcp
+```
+
+其他支持 stdio MCP 的客户端同样只需把 server command 指向
+`.venv/bin/cmem-mcp`。server 只注册 3 个只读工具:
+
+- `search_history`:搜索过去的讨论、决策与原话
+- `get_session`:按搜索结果的 `session_key` 展开整场会话或命中块前后文
+- `memory_status`:查看记忆覆盖范围、完整性和索引新鲜度
+
+server 在客户端会话期间复用 embedding 模型与向量矩阵;另一进程运行
+`cmem index` 后,下次查询会自动重载新索引。
+
+不想使用 MCP 时,Claude Code 也可以直接跑 CLI。在你的
+`~/.claude/CLAUDE.md` 加一条:
 
 ```markdown
 ## 历史会话检索
@@ -61,8 +80,7 @@ cmem status              # 库概况:块数、会话数、日期覆盖
 ```
 
 Codex 使用同样的软约定,写入全局 `~/.codex/AGENTS.md` 即可。之后问
-"上次那个编译错误怎么解决的?",AI 会自行检索并引用原话回答。正式 MCP
-集成仍在规划中,CLI 检索已经可用。
+"上次那个编译错误怎么解决的?",AI 会自行检索并引用原话回答。
 
 ## 工作原理
 
@@ -77,7 +95,7 @@ Codex 使用同样的软约定,写入全局 `~/.codex/AGENTS.md` 即可。之后
  ~/.cmem/raw/              → SQLite(原文 + 来源 + 向量 + FTS,~/.cmem/memory.sqlite3)
  永不自动删除;               ▲
  非追加改写拒绝覆盖             │
-                              │  cmem search
+                              │  cmem search / MCP search_history
               查询嵌入 → 全库精确 cosine ∪ FTS5 关键词召回
                → jieba BM25 + 向量 6:4 融合重排 → top-k 原文
 ```

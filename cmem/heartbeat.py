@@ -54,15 +54,23 @@ def describe(path: Path = HEARTBEAT, now: float | None = None) -> str:
     return f"{t}({ago})"
 
 
-def warn_if_stale(path: Path = HEARTBEAT, now: float | None = None) -> bool:
-    """使用路径上的超龄探测;超龄或无记录时向 stderr 打一行告警。"""
+def staleness_warning(path: Path = HEARTBEAT, now: float | None = None) -> str | None:
+    """返回可嵌入 CLI/MCP 结果的超龄告警;新鲜时返回 None。"""
     h = _age_hours(path, now)
     if h is not None and h <= STALE_AFTER_H:
-        return False
+        return None
     if h is None:
-        print("⚠️ 索引尚无成功记录——请跑 cmem index(建议配置每日自动索引)",
-              file=sys.stderr)
-    else:
-        print(f"⚠️ 索引已 {h / 24:.1f} 天未成功更新,搜索可能缺最近内容——"
-              f"请跑 cmem index;若配置过自动索引,它可能已失效", file=sys.stderr)
+        return "索引尚无成功记录——请运行 cmem index(建议配置每日自动索引)"
+    return (
+        f"索引已 {h / 24:.1f} 天未成功更新,搜索可能缺最近内容——"
+        "请运行 cmem index;若配置过自动索引,它可能已失效"
+    )
+
+
+def warn_if_stale(path: Path = HEARTBEAT, now: float | None = None) -> bool:
+    """使用路径上的超龄探测;超龄或无记录时向 stderr 打一行告警。"""
+    warning = staleness_warning(path, now)
+    if warning is None:
+        return False
+    print(f"⚠️ {warning}", file=sys.stderr)
     return True

@@ -15,10 +15,12 @@ dependencies = [
     "sentence-transformers>=3.0",
     "jieba>=0.42",
     "numpy>=1.26",
+    "mcp>=1.27,<2",
 ]
 
 [project.scripts]
 cmem = "cmem.cli:main"
+cmem-mcp = "cmem.mcp_server:main"
 
 [tool.setuptools]
 packages = ["cmem"]

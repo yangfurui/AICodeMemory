@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from collections.abc import Iterable
 from pathlib import Path
 
 import numpy as np
@@ -305,17 +306,40 @@ class Store:
         matrix = np.frombuffer(b"".join(r[7] for r in rows), dtype=np.float32).reshape(len(rows), DIM)
         return [r[:7] for r in rows], matrix
 
-    def fts_candidates(self, query_tokens: list[str], limit: int = 50) -> set[str]:
+    def fts_candidates(
+        self,
+        query_tokens: list[str],
+        limit: int = 50,
+        *,
+        before: str = "",
+        exclude_projects: Iterable[str] = (),
+        source: str = "",
+    ) -> set[str]:
         """关键词召回:任一 token 命中即为候选(OR 语义),按 FTS5 内置 rank 取前 limit 个 id。
         排序精度不重要——候选随后会与向量候选合并统一重排。"""
         if not query_tokens:
             return set()
         match = " OR ".join('"' + t.replace('"', "") + '"' for t in query_tokens)
+        excluded = tuple(exclude_projects)
+        query = (
+            "SELECT f.id FROM chunks_fts AS f "
+            "JOIN chunks AS c ON c.id = f.id WHERE chunks_fts MATCH ?"
+        )
+        params: list[str | int] = [match]
+        if before:
+            query += " AND c.date != '' AND c.date < ?"
+            params.append(before)
+        if excluded:
+            placeholders = ",".join("?" for _ in excluded)
+            query += f" AND c.project NOT IN ({placeholders})"
+            params.extend(excluded)
+        if source:
+            query += " AND c.source = ?"
+            params.append(source)
+        query += " ORDER BY bm25(chunks_fts) LIMIT ?"
+        params.append(limit)
         try:
-            rows = self.conn.execute(
-                "SELECT id FROM chunks_fts WHERE chunks_fts MATCH ? ORDER BY rank LIMIT ?",
-                (match, limit),
-            ).fetchall()
+            rows = self.conn.execute(query, params).fetchall()
         except sqlite3.OperationalError:  # 查询 token 触发 FTS5 语法边角(如纯符号)
             return set()
         return {r[0] for r in rows}

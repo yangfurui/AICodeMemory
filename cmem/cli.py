@@ -138,45 +138,24 @@ def cmd_index(args) -> int:
 
 
 def cmd_search(args) -> int:
-    from .embedder import Embedder
     from .heartbeat import warn_if_stale
-    from .searcher import search
-    from .store import Store
-    from .tokenizer import tokenize
+    from .service import MemoryService, MemoryServiceError
 
     warn_if_stale()
-    store = Store(Path(args.db).expanduser())
-    rows, matrix = store.load_matrix()
-    if not rows:
-        print("库是空的,先跑 cmem index", file=sys.stderr)
-        return 1
-
-    # 行与矩阵同步裁剪;FTS 候选靠 id 失配自然跟随。
-    if args.before or args.exclude_project or args.source:
-        import numpy as np
-
-        excl = set(args.exclude_project or [])
-        mask = [
-            (not args.before or (r[3] and r[3] < args.before))
-            and r[2] not in excl
-            and (not args.source or r[6] == args.source)
-            for r in rows
-        ]
-        rows = [r for r, keep in zip(rows, mask) if keep]
-        matrix = matrix[np.array(mask)]
-        if not rows:
-            print("过滤条件下没有可检索的块", file=sys.stderr)
-            return 1
-
-    fts_ids = store.fts_candidates(tokenize(args.query))
-    hits = search(
-        rows,
-        matrix,
-        Embedder().encode_query(args.query),
-        args.query,
-        k=args.k,
-        fts_ids=fts_ids,
+    service = MemoryService(
+        Path(args.db).expanduser(), Path(args.raw_dir).expanduser()
     )
+    try:
+        hits = service.search_history(
+            args.query,
+            k=args.k,
+            before=args.before or "",
+            exclude_projects=args.exclude_project or (),
+            source=args.source or "",
+        )
+    except MemoryServiceError as exc:
+        print(exc, file=sys.stderr)
+        return 1
     for rank, hit in enumerate(hits, 1):
         print(
             f"[{rank}] {hit.score:.3f} (cos {hit.cos:.3f} · bm25 {hit.bm25:.2f}) "
@@ -189,24 +168,22 @@ def cmd_search(args) -> int:
 
 
 def cmd_status(args) -> int:
-    from .heartbeat import describe, warn_if_stale
-    from .raw import stats as raw_stats
-    from .store import Store
+    from .heartbeat import warn_if_stale
+    from .service import MemoryService
 
     warn_if_stale()
-    store = Store(Path(args.db).expanduser())
-    s = store.stats()
+    s = MemoryService(
+        Path(args.db).expanduser(), Path(args.raw_dir).expanduser()
+    ).memory_status()
     if not s["chunks"]:
         print("库是空的,先跑 cmem index")
         return 0
-    raw_dir = Path(args.raw_dir).expanduser()
-    r = raw_stats(raw_dir)
     source_summary = ", ".join(
         f"{name} {data['sessions']} 会话/{data['chunks']} 块"
         for name, data in s["sources"].items()
     ) or "无"
     raw_summary = ", ".join(
-        f"{name} {count}" for name, count in sorted(r["sources"].items())
+        f"{name} {count}" for name, count in sorted(s["raw_sources"].items())
     ) or "无"
     print(
         f"块:      {s['chunks']}\n"
@@ -214,10 +191,10 @@ def cmd_status(args) -> int:
         f"项目:    {s['projects']}\n"
         f"来源:    {source_summary}\n"
         f"日期覆盖: {s['date_min']} ~ {s['date_max']}\n"
-        f"raw 存档: {r['files']} 份 / {r['bytes'] / 1048576:.1f} MB"
-        f"({raw_summary}; {raw_dir})\n"
-        f"完整性:  {store.integrity_check()}\n"
-        f"上次成功索引: {describe()}\n"
+        f"raw 存档: {s['raw_files']} 份 / {s['raw_bytes'] / 1048576:.1f} MB"
+        f"({raw_summary}; {s['raw_directory']})\n"
+        f"完整性:  {s['integrity']}\n"
+        f"上次成功索引: {s['index_state']['last_success']}\n"
         f"版本:    extract={s['extract_version']} · model={s['model']}"
     )
     return 0
@@ -277,10 +254,8 @@ def cmd_show(args) -> int:
 
     from .heartbeat import warn_if_stale
     from .raw import find_archive
-    from .store import Store
 
     warn_if_stale()
-    store = Store(Path(args.db).expanduser())
 
     if args.raw:
         matches = find_archive(
@@ -299,30 +274,22 @@ def cmd_show(args) -> int:
         )
         return 0
 
-    query = (
-        "SELECT source, session_id, project, date, chunk_index, text FROM chunks "
-        "WHERE session_id LIKE ?"
-    )
-    params: list[str] = [args.session + "%"]
-    if args.source:
-        query += " AND source = ?"
-        params.append(args.source)
-    query += " ORDER BY source, session_id, chunk_index"
-    rows = store.conn.execute(query, params).fetchall()
-    if not rows:
-        print(f"库中没有匹配 '{args.session}' 的会话", file=sys.stderr)
-        return 1
-    identities = {(r[0], r[1]) for r in rows}
-    if len(identities) > 1:
-        print("匹配多个会话,请用更长前缀或 --source:", file=sys.stderr)
-        for source, sid in sorted(identities):
-            print(f"  {source}:{sid}", file=sys.stderr)
+    from .service import MemoryService, MemoryServiceError
+
+    try:
+        session = MemoryService(
+            Path(args.db).expanduser(), Path(args.raw_dir).expanduser()
+        ).get_session(args.session, source=args.source or "")
+    except MemoryServiceError as exc:
+        print(exc, file=sys.stderr)
         return 1
 
-    source, sid, project, date = rows[0][:4]
-    print(f"会话 {sid} · {source} · {project} · {date} · {len(rows)} 块\n{'=' * 60}")
-    for _, _, _, _, index, text in rows:
-        print(f"\n--- 块 #{index} ---\n{text}")
+    print(
+        f"会话 {session.session_id} · {session.source} · {session.project} · "
+        f"{session.date} · {session.total_chunks} 块\n{'=' * 60}"
+    )
+    for chunk in session.chunks:
+        print(f"\n--- 块 #{chunk.index} ---\n{chunk.text}")
     return 0
 
 

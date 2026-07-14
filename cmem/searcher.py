@@ -37,6 +37,7 @@ class Hit:
     session_id: str
     project: str
     date: str
+    chunk_index: int
     text: str
 
 
@@ -94,9 +95,10 @@ def search(rows: list, matrix: np.ndarray, query_vec: np.ndarray, query: str,
     hits = []
     for j in order:
         i = int(cand_idx[j])
-        _, session_id, project, date, _, text, source = rows[i]
+        _, session_id, project, date, chunk_index, text, source = rows[i]
         hits.append(Hit(
             score=float(fused[j]), cos=float(cos[i]), bm25=float(bm25[j]),
-            source=source, session_id=session_id, project=project, date=date, text=text,
+            source=source, session_id=session_id, project=project, date=date,
+            chunk_index=chunk_index, text=text,
         ))
     return hits
