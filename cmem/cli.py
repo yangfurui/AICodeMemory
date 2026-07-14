@@ -293,6 +293,73 @@ def cmd_show(args) -> int:
     return 0
 
 
+def cmd_setup(args) -> int:
+    from .service import MemoryService
+    from .setup import (
+        SetupError,
+        active_codex_instruction_path,
+        codex_instruction_paths,
+        configure_mcp,
+        resolve_cmem_command,
+        update_instruction_files,
+    )
+
+    claude_md = Path.home() / ".claude" / "CLAUDE.md"
+
+    if args.remove:
+        report = configure_mcp(remove=True)
+        try:
+            update_instruction_files(
+                [claude_md, *codex_instruction_paths()],
+                remove=True,
+            )
+        except SetupError as exc:
+            report.errors.append(str(exc))
+    elif args.instructions:
+        report = None
+        try:
+            update_instruction_files(
+                [claude_md, active_codex_instruction_path()],
+                cmem_command=resolve_cmem_command(),
+            )
+        except SetupError as exc:
+            print(f"错误:{exc}", file=sys.stderr)
+            return 1
+    elif args.claude_md:
+        report = None
+        try:
+            update_instruction_files(
+                [claude_md],
+                cmem_command=resolve_cmem_command(),
+            )
+        except SetupError as exc:
+            print(f"错误:{exc}", file=sys.stderr)
+            return 1
+    else:
+        report = configure_mcp()
+
+    if report is not None and report.errors:
+        for error in report.errors:
+            print(f"错误:{error}", file=sys.stderr)
+        return 1
+    if args.remove:
+        print("AICodeMemory 客户端集成已移除")
+        return 0
+
+    status = MemoryService(
+        Path(args.db).expanduser(), Path(args.raw_dir).expanduser()
+    ).memory_status()
+    print(
+        f"记忆库:{status['chunks']} 块 / {status['sessions']} 会话 / "
+        f"完整性 {status['integrity']}"
+    )
+    if not status["chunks"]:
+        print("记忆库尚空,下一步运行 cmem index")
+    if status["index_state"]["warning"]:
+        print(f"索引提示:{status['index_state']['warning']}")
+    return 0
+
+
 def main() -> None:
     from .raw import RAW_DIR
     from .store import DEFAULT_DB
@@ -354,5 +421,28 @@ def main() -> None:
     sp.add_argument("--source", choices=("claude", "codex"), help="限定会话来源")
     sp.set_defaults(fn=cmd_show)
 
+    sp = sub.add_parser("setup", help="配置 Claude Code / Codex 记忆集成")
+    mode = sp.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--instructions",
+        action="store_true",
+        help="为 Claude Code 和 Codex 写入受管软约定,不注册 MCP",
+    )
+    mode.add_argument(
+        "--claude-md",
+        action="store_true",
+        help="兼容模式:仅写入 ~/.claude/CLAUDE.md,不注册 MCP",
+    )
+    mode.add_argument(
+        "--remove",
+        action="store_true",
+        help="移除 Claude/Codex MCP 配置与全部受管指令区块",
+    )
+    sp.set_defaults(fn=cmd_setup)
+
     args = parser.parse_args()
     sys.exit(args.fn(args))
+
+
+if __name__ == "__main__":
+    main()
