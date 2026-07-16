@@ -300,6 +300,7 @@ def cmd_setup(args) -> int:
         active_codex_instruction_path,
         codex_instruction_paths,
         configure_mcp,
+        discover_cursor_config,
         resolve_cmem_command,
         update_instruction_files,
     )
@@ -307,7 +308,10 @@ def cmd_setup(args) -> int:
     claude_md = Path.home() / ".claude" / "CLAUDE.md"
 
     if args.remove:
-        report = configure_mcp(remove=True)
+        report = configure_mcp(
+            remove=True,
+            cursor_config=discover_cursor_config(),
+        )
         try:
             update_instruction_files(
                 [claude_md, *codex_instruction_paths()],
@@ -336,7 +340,7 @@ def cmd_setup(args) -> int:
             print(f"错误:{exc}", file=sys.stderr)
             return 1
     else:
-        report = configure_mcp()
+        report = configure_mcp(cursor_config=discover_cursor_config())
 
     if report is not None and report.errors:
         for error in report.errors:
@@ -421,7 +425,10 @@ def main() -> None:
     sp.add_argument("--source", choices=("claude", "codex"), help="限定会话来源")
     sp.set_defaults(fn=cmd_show)
 
-    sp = sub.add_parser("setup", help="配置 Claude Code / Codex 记忆集成")
+    sp = sub.add_parser(
+        "setup",
+        help="配置 Claude Code / Codex / Cursor 记忆集成",
+    )
     mode = sp.add_mutually_exclusive_group()
     mode.add_argument(
         "--instructions",
@@ -436,7 +443,7 @@ def main() -> None:
     mode.add_argument(
         "--remove",
         action="store_true",
-        help="移除 Claude/Codex MCP 配置与全部受管指令区块",
+        help="移除 Claude/Codex/Cursor MCP 配置与全部受管指令区块",
     )
     sp.set_defaults(fn=cmd_setup)
 

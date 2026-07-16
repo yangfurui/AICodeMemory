@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ai-code-memory"
 version = "0.1.0"
-description = "Local semantic memory for Claude Code and Codex — verbatim, offline, permanent."
+description = "Local, cross-client semantic memory for AI coding sessions — verbatim, offline, permanent."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "furuiyang" }]
-keywords = ["claude-code", "codex", "memory", "semantic-search", "local-first"]
+keywords = ["claude-code", "codex", "cursor", "memory", "semantic-search", "local-first"]
 dependencies = [
     "sentence-transformers>=3.0",
     "jieba>=0.42",

@@ -40,9 +40,9 @@ def create_server(service: MemoryService | None = None) -> FastMCP:
     server = FastMCP(
         "AICodeMemory",
         instructions=(
-            "Local, read-only memory for Claude Code and Codex sessions. "
-            "When the user asks about past discussions, decisions, original wording, "
-            "or how a previous coding problem was solved, search history before answering."
+            "Vendor-independent, local, read-only archive of Claude Code and "
+            "Codex sessions. Search it when the user needs cross-client history, "
+            "verbatim evidence, older decisions, or how a coding problem was solved."
         ),
     )
 
@@ -55,7 +55,8 @@ def create_server(service: MemoryService | None = None) -> FastMCP:
     ) -> dict[str, Any]:
         """搜索过去的 AI 编码会话原话。
 
-        当用户询问过去的讨论、决策、定案、原话或曾经解决的问题时使用。
+        当用户询问跨客户端历史、过去的讨论/决策、精确原话、
+        稳定出处或曾经解决的问题时使用。
         before 为可选 YYYY-MM-DD(不含当天);exclude_project 可排除自指污染项目。
         结果中的 session_key + chunk_index 可传给 get_session 展开上下文。
         """

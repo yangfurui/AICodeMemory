@@ -17,6 +17,8 @@ from cmem.setup import (
     active_codex_instruction_path,
     codex_instruction_paths,
     configure_mcp,
+    cursor_config_path,
+    discover_cursor_config,
     resolve_module_command,
     update_claude_md,
     update_instruction_files,
@@ -176,8 +178,204 @@ def test_mcp_setup_without_clients_fails_but_remove_is_a_noop():
         emit=lambda _: None,
     )
 
-    assert not install.ok and "--claude-md" in install.errors[0]
+    assert not install.ok and "--instructions" in install.errors[0]
     assert remove.ok
+
+
+def test_cursor_config_registers_preserves_other_servers_and_is_idempotent(
+    tmp_path,
+):
+    path = tmp_path / ".cursor" / "mcp.json"
+    path.parent.mkdir()
+    path.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "mcpServers": {
+                    "other": {
+                        "command": "/bin/other",
+                        "env": {"TOKEN": "do-not-print"},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(0o600)
+    output: list[str] = []
+    server = ["/venv/bin/cmem-mcp"]
+
+    first = configure_mcp(
+        clients=[],
+        cursor_config=path,
+        server_command=server,
+        emit=output.append,
+    )
+    assert first.ok
+    assert first.detected == ["cursor"]
+    assert first.changed == ["cursor"]
+    installed = json.loads(path.read_text(encoding="utf-8"))
+    assert installed["version"] == 1
+    assert installed["mcpServers"]["other"]["env"]["TOKEN"] == "do-not-print"
+    assert installed["mcpServers"]["cmem"] == {
+        "command": server[0],
+        "args": [],
+    }
+    assert path.stat().st_mode & 0o777 == 0o600
+    assert "do-not-print" not in "\n".join(output)
+    installed_text = path.read_text(encoding="utf-8")
+
+    second = configure_mcp(
+        clients=[],
+        cursor_config=path,
+        server_command=server,
+        emit=output.append,
+    )
+    assert second.ok
+    assert second.changed == []
+    assert second.unchanged == ["cursor"]
+    assert path.read_text(encoding="utf-8") == installed_text
+
+
+def test_new_cursor_config_uses_private_file_permissions(tmp_path):
+    path = tmp_path / ".cursor" / "mcp.json"
+
+    report = configure_mcp(
+        clients=[],
+        cursor_config=path,
+        server_command=["/venv/bin/cmem-mcp"],
+        emit=lambda _: None,
+    )
+
+    assert report.ok
+    assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_cursor_conflict_is_preflighted_before_cli_mutation(tmp_path):
+    path = tmp_path / "mcp.json"
+    original = json.dumps(
+        {"mcpServers": {"cmem": {"command": "/bin/unrelated", "args": []}}}
+    )
+    path.write_text(original, encoding="utf-8")
+    runner = FakeRunner()
+
+    report = configure_mcp(
+        clients=CLIENTS,
+        cursor_config=path,
+        server_command=["/venv/bin/cmem-mcp"],
+        runner=runner,
+        emit=lambda _: None,
+    )
+
+    assert not report.ok
+    assert any("Cursor" in error and "保留不覆盖" in error for error in report.errors)
+    assert mutation_calls(runner) == []
+    assert path.read_text(encoding="utf-8") == original
+
+
+def test_malformed_cursor_config_stops_before_cli_mutation(tmp_path):
+    path = tmp_path / "mcp.json"
+    path.write_text("{ broken", encoding="utf-8")
+    runner = FakeRunner()
+
+    report = configure_mcp(
+        clients=CLIENTS,
+        cursor_config=path,
+        server_command=["/venv/bin/cmem-mcp"],
+        runner=runner,
+        emit=lambda _: None,
+    )
+
+    assert not report.ok
+    assert any("Cursor" in error and "有效 JSON" in error for error in report.errors)
+    assert mutation_calls(runner) == []
+    assert path.read_text(encoding="utf-8") == "{ broken"
+
+
+def test_cursor_remove_is_safe_reversible_and_idempotent(tmp_path):
+    path = tmp_path / "mcp.json"
+    path.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "other": {"command": "/bin/other"},
+                    "cmem": {"command": "/old/bin/cmem-mcp", "args": []},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    first = configure_mcp(
+        remove=True,
+        clients=[],
+        cursor_config=path,
+        server_command=["/venv/bin/cmem-mcp"],
+        emit=lambda _: None,
+    )
+    assert first.ok and first.changed == ["cursor"]
+    assert json.loads(path.read_text(encoding="utf-8"))["mcpServers"] == {
+        "other": {"command": "/bin/other"}
+    }
+
+    second = configure_mcp(
+        remove=True,
+        clients=[],
+        cursor_config=path,
+        server_command=["/venv/bin/cmem-mcp"],
+        emit=lambda _: None,
+    )
+    assert second.ok
+    assert second.changed == []
+    assert second.unchanged == ["cursor"]
+
+
+def test_cursor_remove_preserves_unmanaged_same_name_server(tmp_path):
+    path = tmp_path / "mcp.json"
+    original = json.dumps(
+        {"mcpServers": {"cmem": {"command": "/bin/unrelated", "args": []}}}
+    )
+    path.write_text(original, encoding="utf-8")
+
+    report = configure_mcp(
+        remove=True,
+        clients=[],
+        cursor_config=path,
+        server_command=["/venv/bin/cmem-mcp"],
+        emit=lambda _: None,
+    )
+
+    assert not report.ok
+    assert "不属于 AICodeMemory" in report.errors[0]
+    assert path.read_text(encoding="utf-8") == original
+
+
+def test_cursor_detection_uses_global_config_directory_or_application(tmp_path):
+    def nothing(_: str) -> None:
+        return None
+
+    assert discover_cursor_config(
+        home=tmp_path,
+        which=nothing,
+        application_paths=[],
+    ) is None
+
+    cursor_dir = tmp_path / ".cursor"
+    cursor_dir.mkdir()
+    assert discover_cursor_config(
+        home=tmp_path,
+        which=nothing,
+        application_paths=[],
+    ) == cursor_config_path(tmp_path).absolute()
+
+    other_home = tmp_path / "other"
+    app = tmp_path / "Cursor.app"
+    app.mkdir()
+    assert discover_cursor_config(
+        home=other_home,
+        which=nothing,
+        application_paths=[app],
+    ) == cursor_config_path(other_home).absolute()
 
 
 def test_mcp_remove_is_safe_reversible_and_idempotent():

@@ -1,9 +1,9 @@
 """Safe, idempotent client integration for AICodeMemory.
 
 The default mode registers the same local stdio MCP server with every installed
-supported client.  Claude Code and Codex keep separate configuration, so each
-registration is inspected before mutation and an unrelated server named
-``cmem`` is never overwritten.
+supported client.  Claude Code, Codex and Cursor keep separate configuration,
+so each registration is inspected before mutation and an unrelated server
+named ``cmem`` is never overwritten.
 """
 
 from __future__ import annotations
@@ -107,6 +107,13 @@ class InstructionUpdate:
     remove: bool
 
 
+@dataclass(frozen=True)
+class CursorConfigState:
+    path: Path
+    document: dict[str, object]
+    configured: ConfiguredServer | None
+
+
 def run_command(
     command: Sequence[str], timeout: float
 ) -> subprocess.CompletedProcess[str]:
@@ -127,6 +134,53 @@ def discover_clients(which: Which = shutil.which) -> list[ClientSpec]:
                 ClientSpec(key, label, str(Path(executable).expanduser().absolute()))
             )
     return clients
+
+
+def cursor_config_path(home: Path | None = None) -> Path:
+    configured_home = Path(home) if home is not None else Path.home()
+    return configured_home / ".cursor" / "mcp.json"
+
+
+def _cursor_application_paths(home: Path) -> tuple[Path, ...]:
+    if sys.platform == "darwin":
+        return (
+            Path("/Applications/Cursor.app"),
+            home / "Applications" / "Cursor.app",
+        )
+    if os.name == "nt":
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        return (
+            Path(local_app_data) / "Programs" / "cursor" / "Cursor.exe"
+            if local_app_data
+            else home / "AppData" / "Local" / "Programs" / "cursor" / "Cursor.exe",
+        )
+    return (
+        Path("/opt/Cursor/cursor"),
+        Path("/usr/share/applications/cursor.desktop"),
+        home / ".local" / "share" / "applications" / "cursor.desktop",
+    )
+
+
+def discover_cursor_config(
+    *,
+    home: Path | None = None,
+    which: Which = shutil.which,
+    application_paths: Sequence[Path] | None = None,
+) -> Path | None:
+    """Return Cursor's global MCP config when a local Cursor install is visible."""
+    path = cursor_config_path(home).expanduser().absolute()
+    if path.exists() or path.parent.is_dir():
+        return path
+    if which("cursor") or which("cursor-agent"):
+        return path
+
+    if application_paths is None:
+        application_paths = _cursor_application_paths(
+            Path(home) if home is not None else Path.home()
+        )
+    if any(Path(candidate).exists() for candidate in application_paths):
+        return path
+    return None
 
 
 def resolve_module_command(
@@ -205,6 +259,74 @@ def _parse_codex_server(output: str) -> ConfiguredServer:
         raise SetupError("Codex 返回了无法识别的 MCP 配置") from exc
 
 
+def _read_cursor_config(path: Path) -> CursorConfigState:
+    if not path.exists():
+        return CursorConfigState(path, {}, None)
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise SetupError("Cursor 全局 MCP 配置无法读取或不是有效 JSON") from exc
+    if not isinstance(document, dict):
+        raise SetupError("Cursor 全局 MCP 配置顶层必须是 JSON object")
+
+    servers = document.get("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise SetupError("Cursor 全局 MCP 配置的 mcpServers 必须是 JSON object")
+    if SERVER_NAME not in servers:
+        return CursorConfigState(path, document, None)
+
+    raw = servers[SERVER_NAME]
+    if not isinstance(raw, dict):
+        raise SetupError("Cursor 中同名 cmem 配置不是可识别的 stdio server")
+    command = raw.get("command")
+    args = raw.get("args", [])
+    transport = raw.get("type")
+    if (
+        "url" in raw
+        or transport not in (None, "stdio")
+        or not isinstance(command, str)
+        or not command
+        or not isinstance(args, list)
+        or not all(isinstance(arg, str) for arg in args)
+    ):
+        raise SetupError("Cursor 中同名 cmem 配置不是可识别的 stdio server")
+    return CursorConfigState(
+        path,
+        document,
+        ConfiguredServer(command=command, args=tuple(args)),
+    )
+
+
+def _cursor_entry(server_command: Sequence[str]) -> dict[str, object]:
+    return {
+        "command": server_command[0],
+        "args": list(server_command[1:]),
+    }
+
+
+def _write_cursor_config(
+    state: CursorConfigState,
+    server_command: Sequence[str],
+    *,
+    remove: bool,
+) -> None:
+    document = state.document
+    servers = document.get("mcpServers")
+    if servers is None:
+        servers = {}
+        document["mcpServers"] = servers
+    assert isinstance(servers, dict)  # _read_cursor_config 已验证。
+    if remove:
+        servers.pop(SERVER_NAME, None)
+    else:
+        servers[SERVER_NAME] = _cursor_entry(server_command)
+    _atomic_write(
+        state.path,
+        json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+        default_mode=0o600,
+    )
+
+
 def _inspect_client(
     client: ClientSpec, runner: Runner
 ) -> tuple[ConfiguredServer | None, str | None]:
@@ -256,25 +378,32 @@ def configure_mcp(
     *,
     remove: bool = False,
     clients: Sequence[ClientSpec] | None = None,
+    cursor_config: Path | None = None,
     server_command: Sequence[str] | None = None,
     runner: Runner = run_command,
     emit: Emit = print,
 ) -> IntegrationReport:
     clients = list(clients if clients is not None else discover_clients())
-    expected = list(server_command or resolve_mcp_command())
+    expected = list(
+        server_command if server_command is not None else resolve_mcp_command()
+    )
     report = IntegrationReport(detected=[client.key for client in clients])
+    cursor_path = None
+    if cursor_config is not None:
+        cursor_path = Path(cursor_config).expanduser().absolute()
+        report.detected.append("cursor")
 
     if not expected:
         report.errors.append("cmem-mcp 启动命令不能为空")
         return report
 
-    if not clients:
+    if not clients and cursor_path is None:
         if remove:
-            emit("未检测到 Claude Code 或 Codex CLI,MCP 配置无需处理")
+            emit("未检测到 Claude Code、Codex 或 Cursor,MCP 配置无需处理")
         else:
             report.errors.append(
-                "未检测到 Claude Code 或 Codex CLI;可安装客户端后重试,"
-                "或使用 cmem setup --claude-md"
+                "未检测到 Claude Code、Codex 或 Cursor;"
+                "可安装客户端后重试,或使用 cmem setup --instructions"
             )
         return report
 
@@ -285,6 +414,13 @@ def configure_mcp(
             report.errors.append(error)
         else:
             inspected.append((client, configured))
+
+    cursor_state = None
+    if cursor_path is not None:
+        try:
+            cursor_state = _read_cursor_config(cursor_path)
+        except SetupError as exc:
+            report.errors.append(str(exc))
 
     # 先完成所有只读检查;发现同名冲突时不对任何客户端动手。
     for client, configured in inspected:
@@ -299,6 +435,18 @@ def configure_mcp(
         elif not _matches(configured, expected):
             report.errors.append(
                 f"{client.label}: 已有不同的 cmem 配置,已保留不覆盖;"
+                "请先确认并移除旧配置"
+            )
+    if cursor_state is not None and cursor_state.configured is not None:
+        if remove:
+            if not _belongs_to_cmem(cursor_state.configured, expected):
+                report.errors.append(
+                    "Cursor: 同名 cmem 配置不属于 AICodeMemory,"
+                    "已保留不动"
+                )
+        elif not _matches(cursor_state.configured, expected):
+            report.errors.append(
+                "Cursor: 已有不同的 cmem 配置,已保留不覆盖;"
                 "请先确认并移除旧配置"
             )
     if report.errors:
@@ -329,6 +477,32 @@ def configure_mcp(
             continue
         report.changed.append(client.key)
         emit(f"{client.label}: {verb}完成")
+
+    # CLI 写入失败时不再修改 Cursor,避免进一步扩大部分成功状态。
+    if report.errors or cursor_state is None:
+        return report
+    if remove and cursor_state.configured is None:
+        report.unchanged.append("cursor")
+        emit("Cursor: 未配置 cmem,无需移除")
+        return report
+    if not remove and cursor_state.configured is not None:
+        report.unchanged.append("cursor")
+        emit("Cursor: cmem 已正确配置")
+        return report
+
+    if remove:
+        emit(f"Cursor: 将从 {cursor_state.path} 移除 cmem")
+    else:
+        entry = json.dumps(_cursor_entry(expected), ensure_ascii=False)
+        emit(f"Cursor: 将写入 {cursor_state.path}\n  cmem = {entry}")
+    try:
+        _write_cursor_config(cursor_state, expected, remove=remove)
+    except OSError as exc:
+        verb = "移除" if remove else "注册"
+        report.errors.append(f"Cursor: {verb}失败({exc})")
+        return report
+    report.changed.append("cursor")
+    emit(f"Cursor: {'移除' if remove else '注册'}完成")
 
     return report
 
@@ -363,10 +537,19 @@ def active_codex_instruction_path(codex_home: Path | None = None) -> Path:
     return agents
 
 
-def _atomic_write(path: Path, content: str) -> None:
+def _atomic_write(
+    path: Path,
+    content: str,
+    *,
+    default_mode: int = 0o644,
+) -> None:
     target = path.resolve() if path.is_symlink() else path
     target.parent.mkdir(parents=True, exist_ok=True)
-    mode = stat.S_IMODE(target.stat().st_mode) if target.exists() else 0o644
+    mode = (
+        stat.S_IMODE(target.stat().st_mode)
+        if target.exists()
+        else default_mode
+    )
     fd, temporary = tempfile.mkstemp(
         prefix=f".{target.name}.cmem-", dir=target.parent
     )
