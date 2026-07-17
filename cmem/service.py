@@ -144,8 +144,8 @@ class MemoryService:
 
     @staticmethod
     def _validate_source(source: str) -> str:
-        if source and source not in {"claude", "codex"}:
-            raise MemoryServiceError("source 只能是 claude 或 codex")
+        if source and source not in {"claude", "codex", "cursor"}:
+            raise MemoryServiceError("source 只能是 claude、codex 或 cursor")
         return source
 
     def search_history(
@@ -208,7 +208,7 @@ class MemoryService:
             raise MemoryServiceError("会话 ID 不能为空")
         if ":" in session:
             prefix, possible_id = session.split(":", 1)
-            if prefix in {"claude", "codex"}:
+            if prefix in {"claude", "codex", "cursor"}:
                 if source and source != prefix:
                     raise MemoryServiceError("session_key 与 source 冲突")
                 source, session = prefix, possible_id

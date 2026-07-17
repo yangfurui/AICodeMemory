@@ -41,8 +41,9 @@ def create_server(service: MemoryService | None = None) -> FastMCP:
         "AICodeMemory",
         instructions=(
             "Vendor-independent, local, read-only archive of Claude Code and "
-            "Codex sessions. Search it when the user needs cross-client history, "
-            "verbatim evidence, older decisions, or how a coding problem was solved."
+            "Codex and Cursor sessions. Search it when the user needs cross-client "
+            "history, verbatim evidence, older decisions, or how a coding problem "
+            "was solved."
         ),
     )
 
@@ -52,12 +53,14 @@ def create_server(service: MemoryService | None = None) -> FastMCP:
         k: int = 5,
         before: str = "",
         exclude_project: str = "",
+        source: str = "",
     ) -> dict[str, Any]:
         """搜索过去的 AI 编码会话原话。
 
         当用户询问跨客户端历史、过去的讨论/决策、精确原话、
         稳定出处或曾经解决的问题时使用。
-        before 为可选 YYYY-MM-DD(不含当天);exclude_project 可排除自指污染项目。
+        before 为可选 YYYY-MM-DD(不含当天);exclude_project 可排除自指污染项目;
+        source 可限定 claude/codex/cursor。
         结果中的 session_key + chunk_index 可传给 get_session 展开上下文。
         """
         try:
@@ -66,6 +69,7 @@ def create_server(service: MemoryService | None = None) -> FastMCP:
                 k=k,
                 before=before,
                 exclude_projects=(exclude_project,) if exclude_project else (),
+                source=source,
             )
         except MemoryServiceError as exc:
             raise ToolError(str(exc)) from exc

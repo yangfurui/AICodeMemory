@@ -48,7 +48,9 @@ def test_server_exposes_only_the_three_read_tools(tmp_path):
     async def exercise_server():
         tools = await server.list_tools()
         status = await server.call_tool("memory_status", {})
-        search = await server.call_tool("search_history", {"query": "needle"})
+        search = await server.call_tool(
+            "search_history", {"query": "needle", "source": "codex"}
+        )
         session = await server.call_tool(
             "get_session", {"session_id": "codex:session-1", "around": 0}
         )
@@ -70,6 +72,7 @@ def test_server_exposes_only_the_three_read_tools(tmp_path):
         "k",
         "before",
         "exclude_project",
+        "source",
     }
     assert schemas["get_session"]["required"] == ["session_id"]
     assert status["integrity"] == "ok"

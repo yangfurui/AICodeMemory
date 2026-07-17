@@ -181,6 +181,29 @@ def test_get_session_supports_source_key_and_around_window(tmp_path):
         service.get_session("claude:same", around=99)
 
 
+def test_search_can_filter_cursor_as_a_first_class_source(tmp_path):
+    store = Store(tmp_path / "memory.sqlite3")
+    store.pending_migration()
+    index_chunks(
+        store,
+        "cursor",
+        "cursor-session",
+        ["Cursor 中确认的原始结论"],
+        [unit_vector(0)],
+        project="cursor-project",
+    )
+    service = MemoryService(
+        embedder_factory=lambda: FakeEmbedder([]),
+        store=store,
+    )
+
+    hits = service.search_history("原始结论", source="cursor")
+
+    assert len(hits) == 1
+    assert hits[0].source == "cursor"
+    assert service.get_session("cursor:cursor-session").source == "cursor"
+
+
 def test_memory_status_includes_pure_staleness_state(tmp_path):
     store = Store(tmp_path / "memory.sqlite3")
     store.pending_migration()

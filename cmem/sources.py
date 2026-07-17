@@ -1,4 +1,4 @@
-"""Session source registry for Claude Code and local Codex clients."""
+"""Session source registry for Claude Code, Codex and Cursor."""
 
 from __future__ import annotations
 
@@ -22,8 +22,13 @@ class SourceAdapter:
             yield from sorted(self.root.rglob("*.jsonl"))
 
 
-def build_adapters(claude_root: Path, codex_root: Path) -> dict[str, SourceAdapter]:
+def build_adapters(
+    claude_root: Path,
+    codex_root: Path,
+    cursor_root: Path,
+) -> dict[str, SourceAdapter]:
     from . import codex_extractor
+    from . import cursor_extractor
     from . import extractor as claude_extractor
 
     return {
@@ -39,6 +44,13 @@ def build_adapters(claude_root: Path, codex_root: Path) -> dict[str, SourceAdapt
             root=codex_root,
             parse_session=codex_extractor.parse_session,
             session_id_of=codex_extractor.session_id_of,
+            should_index=lambda _p: True,
+        ),
+        "cursor": SourceAdapter(
+            name="cursor",
+            root=cursor_root,
+            parse_session=cursor_extractor.parse_session,
+            session_id_of=cursor_extractor.session_id_of,
             should_index=lambda _p: True,
         ),
     }

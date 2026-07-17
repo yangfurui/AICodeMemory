@@ -14,7 +14,7 @@ class Message:
 
 @dataclass
 class SessionDialogue:
-    source: str  # "claude" | "codex"
+    source: str  # "claude" | "codex" | "cursor"
     session_id: str
     project: str
     date: str  # 最后一条有效消息的本地日期 YYYY-MM-DD

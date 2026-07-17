@@ -25,8 +25,8 @@ from .dialogue import Message, SessionDialogue, to_local_date
 # 去噪/切块算法的版本轴:本文件的过滤规则或 chunker 的切块策略发生语义
 # 变化时 bump。库检测到不一致会触发"从 raw 存档重提取"(见 store 的
 # pending_migration)——只在真正影响产出的变更时动它。
-# Claude 的清洗输出仍是 v0.2 的 "2"。Codex 是新增来源,不应迫使既有
-# Claude 档案做一次无意义的全量重嵌入;未来任一来源的清洗语义变化再 bump。
+# Claude 的清洗输出仍是 v0.2 的 "2"。Codex/Cursor 是新增来源,不应迫使
+# 既有 Claude 档案做一次无意义的全量重嵌入;未来任一来源的清洗语义变化再 bump。
 EXTRACT_VERSION = "2"
 
 # 系统注入的提醒块,出现在 user 消息文本内

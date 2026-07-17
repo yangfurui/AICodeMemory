@@ -1,4 +1,4 @@
-"""cmem — archive and search Claude Code + Codex sessions."""
+"""cmem — archive and search Claude Code, Codex and Cursor sessions."""
 
 from __future__ import annotations
 
@@ -12,7 +12,20 @@ DEFAULT_CODEX_SOURCE = Path.home() / ".codex" / "sessions"
 
 
 def cmd_index(args) -> int:
+    import tempfile
+
+    with tempfile.TemporaryDirectory(prefix="cmem-cursor-") as temporary:
+        return _cmd_index(args, Path(temporary))
+
+
+def _cmd_index(args, cursor_root: Path) -> int:
     from .chunker import chunk_session
+    from .cursor_extractor import (
+        DEFAULT_SOURCE as DEFAULT_CURSOR_SOURCE,
+        CursorSourceError,
+        locate_database,
+        materialize_sessions,
+    )
     from .heartbeat import mark_success
     from .raw import (
         ArchiveConflictError,
@@ -25,10 +38,35 @@ def cmd_index(args) -> int:
     from .store import Store
 
     raw_dir = Path(args.raw_dir).expanduser()
+    selected = set(args.provider or ("claude", "codex", "cursor"))
+    cursor_issues: list[str] = []
+    if "cursor" in selected:
+        cursor_source = Path(
+            getattr(args, "cursor_source", DEFAULT_CURSOR_SOURCE)
+        ).expanduser()
+        try:
+            locate_database(cursor_source)
+        except CursorSourceError as exc:
+            print(f"警告:{exc},仅从 raw 存档索引 cursor", file=sys.stderr)
+        else:
+            try:
+                exported = materialize_sessions(
+                    cursor_source, raw_dir, cursor_root
+                )
+            except CursorSourceError as exc:
+                cursor_issues.append(str(exc))
+            else:
+                cursor_issues.extend(exported.issues)
+                print(
+                    f"Cursor:扫描 {exported.sessions_seen} 场本地会话,"
+                    f"导出 {exported.sessions_exported} 场 / "
+                    f"{exported.messages_exported} 条消息"
+                )
     adapters = build_adapters(
-        Path(args.source).expanduser(), Path(args.codex_source).expanduser()
+        Path(args.source).expanduser(),
+        Path(args.codex_source).expanduser(),
+        cursor_root,
     )
-    selected = set(args.provider or adapters)
     store = Store(Path(args.db).expanduser())
 
     embedder = None  # 惰性:全部会话都无需更新时,不加载模型
@@ -53,7 +91,10 @@ def cmd_index(args) -> int:
         store.reset_processed_ledger()
 
     t0 = time.time()
-    n_seen = n_indexed = n_chunks = n_archived = n_failed = 0
+    n_seen = n_indexed = n_chunks = n_archived = 0
+    n_failed = len(cursor_issues)
+    for issue in cursor_issues:
+        print(f"错误:{issue}", file=sys.stderr)
 
     def index_file(f: Path, adapter, archive: bool) -> None:
         nonlocal n_seen, n_indexed, n_chunks, n_archived, n_failed
@@ -126,7 +167,7 @@ def cmd_index(args) -> int:
         return 2
     if n_failed:
         print(
-            f"异常:{n_failed} 份源文件未安全收编,本次索引视同失败(不刷新心跳)",
+            f"异常:{n_failed} 份源记录未安全收编,本次索引视同失败(不刷新心跳)",
             file=sys.stderr,
         )
         return 1
@@ -365,6 +406,7 @@ def cmd_setup(args) -> int:
 
 
 def main() -> None:
+    from .cursor_extractor import DEFAULT_SOURCE as DEFAULT_CURSOR_SOURCE
     from .raw import RAW_DIR
     from .store import DEFAULT_DB
 
@@ -377,7 +419,9 @@ def main() -> None:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sp = sub.add_parser("index", help="增量索引 Claude Code + Codex 会话")
+    sp = sub.add_parser(
+        "index", help="增量索引 Claude Code + Codex + Cursor 会话"
+    )
     sp.add_argument(
         "--source", default=str(DEFAULT_SOURCE),
         help=f"Claude 会话目录(兼容旧参数;默认 {DEFAULT_SOURCE})",
@@ -387,8 +431,15 @@ def main() -> None:
         help=f"Codex 会话目录(默认 {DEFAULT_CODEX_SOURCE})",
     )
     sp.add_argument(
-        "--provider", action="append", choices=("claude", "codex"),
-        help="只索引指定来源;可重复。默认两者都索引",
+        "--cursor-source",
+        default=str(DEFAULT_CURSOR_SOURCE),
+        help=f"Cursor User 数据目录或 state.vscdb(默认 {DEFAULT_CURSOR_SOURCE})",
+    )
+    sp.add_argument(
+        "--provider",
+        action="append",
+        choices=("claude", "codex", "cursor"),
+        help="只索引指定来源;可重复。默认三者都索引",
     )
     sp.add_argument("--no-heartbeat", action="store_true", help=argparse.SUPPRESS)
     sp.set_defaults(fn=cmd_index)
@@ -401,7 +452,11 @@ def main() -> None:
         "--exclude-project", action="append", metavar="NAME",
         help="排除指定项目,可重复使用",
     )
-    sp.add_argument("--source", choices=("claude", "codex"), help="只检索指定来源")
+    sp.add_argument(
+        "--source",
+        choices=("claude", "codex", "cursor"),
+        help="只检索指定来源",
+    )
     sp.set_defaults(fn=cmd_search)
 
     sp = sub.add_parser("status", help="索引库概况")
@@ -409,7 +464,11 @@ def main() -> None:
 
     sp = sub.add_parser("list", help="列出当前检索投影中的会话")
     sp.add_argument("--since", metavar="YYYY-MM-DD", help="只列该日期(含)之后的会话")
-    sp.add_argument("--source", choices=("claude", "codex"), help="只列指定来源")
+    sp.add_argument(
+        "--source",
+        choices=("claude", "codex", "cursor"),
+        help="只列指定来源",
+    )
     sp.add_argument(
         "--porcelain", action="store_true",
         help="TAB 输出(sid/mtime/date/project/chunks/source),供脚本用",
@@ -421,8 +480,12 @@ def main() -> None:
 
     sp = sub.add_parser("show", help="展开一场会话的完整上下文")
     sp.add_argument("session", help="会话 ID(前缀即可)")
-    sp.add_argument("--raw", action="store_true", help="输出未去噪的原始 jsonl")
-    sp.add_argument("--source", choices=("claude", "codex"), help="限定会话来源")
+    sp.add_argument("--raw", action="store_true", help="输出永久档案中的 JSONL")
+    sp.add_argument(
+        "--source",
+        choices=("claude", "codex", "cursor"),
+        help="限定会话来源",
+    )
     sp.set_defaults(fn=cmd_show)
 
     sp = sub.add_parser(

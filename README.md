@@ -4,9 +4,9 @@
 
 Local semantic memory for your AI coding sessions — verbatim, offline, forever.
 
-把 `~/.claude/projects/` 与 `~/.codex/sessions/` 下的会话历史归档成
-**永久、可语义检索**的本地记忆库,让你以及 AI 自己随时找回"当时的原话",
-哪怕上游记录已经被清理或格式发生变化。
+把 Claude Code、Codex 与 Cursor 的本地会话历史归档成**永久、可语义检索**
+的本地记忆库,让你以及 AI 自己随时找回"当时的原话",哪怕上游记录已经
+被清理或格式发生变化。
 
 ```
 $ cmem search "AGP 8 升级后 Kotlin 编译失败怎么解决"
@@ -22,10 +22,10 @@ $ cmem search "AGP 8 升级后 Kotlin 编译失败怎么解决"
 AI 编码助手的本地会话首先是产品运行状态,不是稳定的长期档案;每个新会话也
 不会可靠地带回全部旧上下文。AICodeMemory 在上游记录仍可见时把它们归档:
 
-- **永久档案** — 原始会话先安全存成 gzip 底片,SQLite 只保存当前检索投影;源被清理后仍可从 raw 完整重建,算法升级永不触碰底片(有契约测试锁死)
+- **永久档案** — 会话先安全存成 gzip 底片,SQLite 只保存当前检索投影;源被清理后仍可从 raw 完整重建,算法升级永不触碰底片(有契约测试锁死)
 - **极简** — 单文件 SQLite + numpy 精确检索,零服务、零守护进程、零配置。核心代码几百行,一顿饭的时间能读完
 - **中文一等公民** — bge 中文 embedding + jieba 分词的混合检索(语义 0.6 + 关键词 0.4)
-- **跨客户端** — Claude Code 与 Codex 的原话进同一座档案库,Claude、Codex、Cursor 都能通过同一个 MCP 查询
+- **跨客户端** — Claude Code、Codex 与 Cursor 的原话进同一座档案库,三个客户端也都能通过同一个 MCP 查询
 - **本地数据层** — 存档、embedding 与检索无 API key、无云、无遥测;AI 集成只把命中原文交给当前客户端(见下文隐私边界)
 
 ## 安装
@@ -105,8 +105,8 @@ cmem status
 cmem search "上次那个编译错误怎么解决的?"
 ```
 
-`cmem index` 会同时扫描 Claude Code 和 Codex,某个客户端未安装不影响
-另一个。首次索引会从 HuggingFace 下载 embedding 模型
+`cmem index` 会同时扫描 Claude Code、Codex 和 Cursor,某个客户端未安装
+不影响另外两个。首次索引会从 HuggingFace 下载 embedding 模型
 (`BAAI/bge-small-zh-v1.5`,约 100MB),之后存档、embedding 和搜索都可以
 离线进行。
 
@@ -124,8 +124,8 @@ cmem setup --instructions  # 不注册 MCP,只写入 CLI 搜索软约定
 ## 常用命令
 
 ```bash
-cmem index               # 同时索引 Claude Code + Codex(增量,首次即全量)
-cmem index --provider codex  # 只索引 Codex;可换成 claude
+cmem index               # 同时索引 Claude Code + Codex + Cursor
+cmem index --provider cursor # 只索引 Cursor;也可换成 claude/codex
 cmem search "查询" -k 5  # 语义检索,返回原文块+出处(日期/项目/会话)
 cmem search "查询" --source codex  # 只查指定来源
 cmem status              # 库概况:块数、会话数、日期覆盖
@@ -157,8 +157,14 @@ server 只注册 3 个只读工具:
 server 在客户端会话期间复用 embedding 模型与向量矩阵;另一进程运行
 `cmem index` 后,下次查询会自动重载新索引。
 
-Cursor 当前是 AICodeMemory 的**查询客户端**;现阶段 `cmem index` 仍只归档
-Claude Code 与 Codex 会话,Cursor 自身聊天归档将作为后续来源适配器。
+Cursor 的普通 Agent 历史由[官方说明](https://docs.cursor.com/en/agent/chat/history)
+保存在本地 SQLite。AICodeMemory 会把共享数据库规范化为逐会话、只追加的
+JSONL 底片:保留所有非空 user/assistant 文字、项目与时间出处;排除工具调用、
+代码上下文和执行状态等大体积内部载荷。当前检索投影每轮取最后一条 assistant
+文字作为最终回答;消息被 Cursor 修改时会追加 revision,不会覆盖旧底片。
+Background Agent 对话由 Cursor 存在远端,不在本地采集范围内。Cursor 官方
+没有把 SQLite 内部表结构承诺为稳定接口;若未来版本不兼容,索引会明确失败且
+不刷新成功心跳,避免静默漏采。
 
 不想使用 MCP 时,Claude Code 和 Codex 也可以直接跑 CLI。下面命令会在回显
 将写入的受管区块后,幂等更新 `~/.claude/CLAUDE.md` 与 Codex 当前
@@ -191,12 +197,13 @@ Claude/Codex/Cursor 中的 MCP 配置和
 
 ```
 ~/.claude/projects/**/*.jsonl ─┐
-~/.codex/sessions/**/*.jsonl  ─┴─(Claude/Codex 来源适配器)
+~/.codex/sessions/**/*.jsonl  ─┤
+Cursor/User/globalStorage/state.vscdb ─(规范化逐字消息)─┘
     │  cmem index(一次扫描,双层归档)
     ├────────────────────────┐
     ▼                        ▼
 【raw 永久档案】       【text 当前投影 + 索引层】
- 源文件原样 gzip           去噪 → 一问一答切块 → 本地嵌入(bge, 512 维)
+ JSONL gzip 底片           去噪 → 一问一答切块 → 本地嵌入(bge, 512 维)
  ~/.cmem/raw/              → SQLite(原文 + 来源 + 向量 + FTS,~/.cmem/memory.sqlite3)
  永不自动删除;               ▲
  非追加改写拒绝覆盖             │
@@ -209,7 +216,7 @@ Claude/Codex/Cursor 中的 MCP 配置和
 
 | 层 | 内容 | 能否再生 |
 |---|---|---|
-| raw 永久档案 | 源 jsonl 的 gzip 拷贝(底片) | 不可再生,**永不自动删除**;只接受字节级追加更新 |
+| raw 永久档案 | Claude/Codex 源 JSONL;Cursor 逐字消息事件 JSONL | 不可再生,**永不自动删除**;只接受字节级追加更新 |
 | text 当前投影 | 去噪、切块后的对话文本 | 可从 raw 重提取;会话更新时原子替换 |
 | 索引层 | 向量 + FTS | 随时可从 text 投影重算 |
 

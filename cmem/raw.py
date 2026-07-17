@@ -1,8 +1,8 @@
 """Raw archive layer — the permanent source of truth.
 
-上游 jsonl(Claude Code / Codex)可能被清理或改变格式。SQLite 里的
-text/chunks 是去噪、切块后的当前检索投影,而本层把源文件
-**原样 gzip 存档**(底片):
+上游历史(Claude Code / Codex JSONL 与 Cursor 本地 SQLite)可能被清理
+或改变格式。SQLite 里的 text/chunks 是去噪、切块后的当前检索投影,
+而本层保存 gzip 底片:
 任何未来的去噪/切块算法改进,都能凭它回溯应用到全部历史——包括源早已
 消失的部分。
 
@@ -14,9 +14,14 @@ text/chunks 是去噪、切块后的当前检索投影,而本层把源文件
   保住旧底片并让整次索引显式失败。
 - 原子写入:先写 .tmp 再 rename,中断不留半个存档。
 
-Claude legacy 目录保持不动;Codex 新档案按来源隔离:
+Claude legacy 目录保持不动;Codex/Cursor 新档案按来源隔离:
 - ~/.cmem/raw/<Claude 项目>/<会话>.jsonl.gz
 - ~/.cmem/raw/codex/YYYY/MM/DD/<rollout>.jsonl.gz
+- ~/.cmem/raw/cursor/<composer-id>.jsonl.gz
+
+Cursor 的上游是共享可变数据库,不能逐会话做字节级镜像。Cursor adapter
+先把逐字 user/assistant 文本转换为追加式 JSONL 事件;消息被编辑时追加
+revision,再进入本模块同一份 append-only gzip 契约。
 """
 
 from __future__ import annotations
@@ -122,7 +127,7 @@ def archive_source_of(path: Path, raw_dir: Path = RAW_DIR) -> str:
         first = path.relative_to(raw_dir).parts[0]
     except (ValueError, IndexError):
         return "claude"
-    return first if first in {"claude", "codex"} else "claude"
+    return first if first in {"claude", "codex", "cursor"} else "claude"
 
 
 def content_size(path: Path) -> int:
@@ -182,6 +187,10 @@ def find_archive(
             continue
         if provider == "codex":
             from .codex_extractor import session_id_of
+
+            matched = session_id_of(path).startswith(session_prefix)
+        elif provider == "cursor":
+            from .cursor_extractor import session_id_of
 
             matched = session_id_of(path).startswith(session_prefix)
         else:
